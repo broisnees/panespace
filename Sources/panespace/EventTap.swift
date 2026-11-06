@@ -11,6 +11,8 @@ final class EventTap {
     /// A left click the app receives (not a floating_modifier drag), at its screen point.
     var onMouseDown: (CGPoint) -> Void = { _ in }
     var onMouseMoved: (CGPoint) -> Void = { _ in }
+    /// A plain left drag (say, a window by its title bar), coalesced: for the drop preview.
+    var onDrag: (CGPoint) -> Void = { _ in }
     /// floating_modifier + click: begin(resize: right button), move (coalesced), end.
     var onModDrag: (ModDragPhase, CGPoint) -> Void = { _, _ in }
 
@@ -30,6 +32,8 @@ final class EventTap {
     private var dragButton: CGMouseButton?
     private var dragPoint = CGPoint.zero
     private var dragDispatchPending = false
+    private var plainDragPoint = CGPoint.zero
+    private var plainDragPending = false
     private var tap: CFMachPort?
 
     var isMouseDown: Bool { lock.withLock { _mouseDown } }
@@ -196,13 +200,27 @@ final class EventTap {
         case .leftMouseDragged, .rightMouseDragged:
             // Coalesce: at most one move in flight on the main thread, always with the latest point.
             let p1 = event.location
-            let (active, dispatch) = lock.withLock { () -> (Bool, Bool) in
+            let (active, dispatch, plain) = lock.withLock { () -> (Bool, Bool, Bool) in
                 // A few points of jitter in a double-click isn't a drag.
                 if !_click.dragged, hypot(p1.x - _click.down.x, p1.y - _click.down.y) > 4 { _click.dragged = true }
-                guard dragButton != nil else { return (false, false) }
+                guard dragButton != nil else {
+                    guard type == .leftMouseDragged, _click.dragged else { return (false, false, false) }
+                    plainDragPoint = p1
+                    defer { plainDragPending = true }
+                    return (false, false, !plainDragPending)
+                }
                 dragPoint = event.location
                 defer { dragDispatchPending = true }
-                return (true, !dragDispatchPending)
+                return (true, !dragDispatchPending, false)
+            }
+            if plain {
+                DispatchQueue.main.async {
+                    let p = self.lock.withLock { () -> CGPoint in
+                        self.plainDragPending = false
+                        return self.plainDragPoint
+                    }
+                    self.onDrag(p)
+                }
             }
             if dispatch {
                 DispatchQueue.main.async {

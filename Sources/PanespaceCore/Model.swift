@@ -456,21 +456,6 @@ public final class Model {
         }
     }
 
-    /// The user dragged a tiled window and let go at `p`: swap with / move next to the window under it.
-    public func userDropped(_ id: WindowID, at p: CGPoint) {
-        guard let w = windows[id], !w.isFloating, let src = w.workspace else { return }
-        for ws in visible.values {
-            if let t = ws.root.windows.first(where: { $0 !== w && $0.rect.contains(p) }) {
-                if ws === src { src.swap(w, t) } else { moveNode(w, to: ws, anchor: t); setFocus(w) }
-                return
-            }
-        }
-        if let m = monitor(containing: p), let ws = visible[m.id], ws !== src, ws.root.children.isEmpty {
-            moveNode(w, to: ws)
-            setFocus(w)
-        }
-    }
-
     // MARK: Placement
 
     /// Computes where every window belongs. Also refreshes node rects.
