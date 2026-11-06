@@ -81,6 +81,26 @@ final class StatusBar: NSObject, NSMenuDelegate {
         }
         menu.addItem(.separator())
 
+        // Quick controls: the things worth reaching without remembering a key.
+        menu.addItem(header("Quick Controls"))
+        menu.addItem(commandItem("Find Window…", "switcher", symbol: "magnifyingglass"))
+        menu.addItem(commandItem("Previous Workspace", "workspace prev", symbol: "chevron.left"))
+        menu.addItem(commandItem("Next Workspace", "workspace next", symbol: "chevron.right"))
+        menu.addItem(commandItem("Last Workspace", "workspace back_and_forth", symbol: "arrow.uturn.backward"))
+        if model.monitors.count > 1 {
+            menu.addItem(commandItem("Focus Other Display", "focus output next", symbol: "display.2"))
+            if model.focusedWindow != nil {
+                menu.addItem(commandItem("Send Window to Other Display", "move container to output next",
+                                         symbol: "rectangle.portrait.and.arrow.right"))
+            }
+            menu.addItem(commandItem("Send Workspace to Other Display", "move workspace to output next",
+                                     symbol: "rectangle.portrait.on.rectangle.portrait"))
+        }
+        if model.focusedWindow != nil {
+            menu.addItem(commandItem("Close Window", "kill", symbol: "xmark.square"))
+        }
+        menu.addItem(.separator())
+
         let immersive = menuItem("Immersive Mode", #selector(toggleImmersive), shortcut: "immersive toggle",
                                  symbol: "rectangle.inset.filled")
         immersive.state = manager.chrome.isImmersive ? .on : .off

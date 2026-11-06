@@ -45,6 +45,9 @@ public enum Command: Equatable {
     case movePositionCenter
     case scratchpadShow
     case workspace(WorkspaceTarget, noAutoBackAndForth: Bool)
+    /// panespace: `workspace number 3 output next` shows that workspace on that monitor, bringing it over if it
+    /// lives on another one.
+    case workspaceOnOutput(WorkspaceTarget, OutputTarget)
     case split(Orientation?)  // nil = toggle
     case layout(LayoutArg)
     case fullscreen(Toggle)
@@ -53,6 +56,8 @@ public enum Command: Equatable {
     case balance
     /// panespace: auto-hide the macOS menu bar and Dock so tiles use the whole screen (Omarchy-style).
     case immersive(Toggle)
+    /// panespace: a search box over every window (type, arrows, Return to jump to it).
+    case switcher
     case kill
     case reload
     case exit
@@ -180,6 +185,7 @@ public enum CommandParser {
         case "exit": return .exit
         case "balance": return .balance
         case "immersive": return .immersive(try toggle(arg(0) ?? "toggle"))
+        case "switcher": return .switcher
         case "mode":
             guard let m = a.first else { throw ParseError("mode needs a name") }
             return .mode(m)
@@ -223,6 +229,9 @@ public enum CommandParser {
             }
 
         case "workspace":
+            if let o = a.lastIndex(where: { $0.lowercased() == "output" }), o > 0, o + 1 < a.count {
+                return .workspaceOnOutput(try workspace(Array(a[..<o])).0, try output(Array(a[(o + 1)...])))
+            }
             let (t, noAuto) = try workspace(a)
             return .workspace(t, noAutoBackAndForth: noAuto)
 

@@ -18,6 +18,7 @@ final class EventTap {
 
     private let lock = NSLock()
     private var bindings: [KeyCombo: String] = [:]
+    private var oneShot = false
     private var _lastAppSwitch = Date.distantPast
     /// When the user last pressed Cmd-Tab (or Cmd-`): an app activation right after it is the user's doing.
     var lastAppSwitch: Date { lock.withLock { _lastAppSwitch } }
@@ -48,8 +49,9 @@ final class EventTap {
     var click: Click { lock.withLock { _click } }
 
     func setBindings(_ b: [KeyCombo: String], trackMouseMoves: Bool, floatingModifier: Modifiers?, capsLock: Bool,
-                     interceptFullscreen: Bool) {
+                     interceptFullscreen: Bool, oneShot: Bool = false) {
         lock.withLock {
+            self.oneShot = oneShot
             self.interceptFullscreen = interceptFullscreen
             bindings = b
             _trackMoves = trackMouseMoves
@@ -104,6 +106,13 @@ final class EventTap {
         return true
     }
 
+    /// True for the commands where holding the key is useful: focus, move (a direction) and resize.
+    private static func repeats(_ cmd: String) -> Bool {
+        let w = cmd.split(separator: " ").map(String.init)
+        if w.first == "focus" || w.first == "move" { return w.count == 2 }
+        return w.first == "resize"
+    }
+
     private let debug = ProcessInfo.processInfo.environment["PANESPACE_DEBUG"] != nil
 
     private func handle(_ type: CGEventType, _ event: CGEvent) -> Unmanaged<CGEvent>? {
@@ -137,6 +146,7 @@ final class EventTap {
                 return nil  // the Caps key itself never reaches apps
             }
             guard type == .keyDown else { break }
+            let repeats = event.getIntegerValueField(.keyboardEventAutorepeat) != 0
             let (mods, capsHeld) = modifiers(event)
             if mods.contains(.command), code == 0x30 || code == 0x32 { lock.withLock { _lastAppSwitch = Date() } }
             var cmd = lock.withLock { bindings[KeyCombo(keyCode: code, modifiers: mods)] }
@@ -145,7 +155,19 @@ final class EventTap {
                mods == [.control, .command] || (mods.isEmpty && event.flags.contains(.maskSecondaryFn)) {
                 cmd = "fullscreen toggle"
             }
+            // A one-shot mode (leader key): leave it first, then run the key's command (which may enter
+            // another mode, e.g. resize). A key it doesn't bind just leaves it, and never reaches the app.
+            if lock.withLock({ oneShot }) {
+                if repeats { return nil }  // holding the leader key must not pick a command by itself
+                lock.withLock { oneShot = false }  // a fast second key goes to the default bindings
+                let run = cmd.map { "mode default; " + $0 } ?? "mode default"
+                let t = CACurrentMediaTime()
+                DispatchQueue.main.async { self.onCommand(run, t) }
+                return nil
+            }
             if let cmd {
+                // Holding a key may repeat focus, move and resize; toggles and modes would flip on each repeat.
+                if repeats && !Self.repeats(cmd) { return nil }
                 let t = CACurrentMediaTime()
                 DispatchQueue.main.async { self.onCommand(cmd, t) }
                 return nil  // swallow

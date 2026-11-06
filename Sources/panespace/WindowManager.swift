@@ -97,6 +97,7 @@ final class WindowManager {
     /// When the command being applied was asked for (key press or CLI), to time it to the first frame.
     private var commandAt: Double?
     let chrome = MacChrome()
+    private let switcher = SwitcherPanel()
 
     private let axQueue = DispatchQueue(label: "panespace.ax", qos: .userInteractive)
     private let syncQueue = DispatchQueue(label: "panespace.sync", qos: .userInitiated)
@@ -294,6 +295,7 @@ final class WindowManager {
         timers += [sweep, tick]
 
         statusBar.install(manager: self)
+        watchConfig()
         checkSpaces()
         if let want = model.config.immersive { chrome.set(want) }
         requestSync(.all)
@@ -404,7 +406,47 @@ final class WindowManager {
         return (c, c.warnings)
     }
 
+    private var configWatcher: DispatchSourceFileSystemObject?
+    private var configReloadWork: DispatchWorkItem?
+    private var lastConfigText: String?
+
+    /// Hot reload: the config is read again whenever it's saved. Editors often save by replacing the file,
+    /// so the watch is re-armed after a rename or delete (and retried until the new file exists).
+    private func watchConfig() {
+        configWatcher?.cancel()
+        configWatcher = nil
+        if lastConfigText == nil { lastConfigText = try? String(contentsOf: configURL, encoding: .utf8) }
+        let fd = open(configURL.path, O_EVTONLY)
+        guard fd >= 0 else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.watchConfig() }
+            return
+        }
+        let src = DispatchSource.makeFileSystemObjectSource(fileDescriptor: fd, eventMask: [.write, .extend, .rename, .delete],
+                                                            queue: .main)
+        src.setEventHandler { [weak self, unowned src] in
+            guard let self else { return }
+            let replaced = !src.data.isDisjoint(with: [.rename, .delete])
+            configReloadWork?.cancel()
+            let work = DispatchWorkItem { [weak self] in
+                guard let self else { return }
+                if replaced { watchConfig() }
+                // Only when the text really changed (saving twice, or a touch, does nothing).
+                let text = try? String(contentsOf: configURL, encoding: .utf8)
+                guard let text, text != lastConfigText else { return }
+                lastConfigText = text
+                log("config changed on disk; reloading")
+                reload()
+            }
+            configReloadWork = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: work)  // editors write in bursts
+        }
+        src.setCancelHandler { close(fd) }
+        src.resume()
+        configWatcher = src
+    }
+
     func reload() {
+        lastConfigText = try? String(contentsOf: configURL, encoding: .utf8)
         let before = model.config.immersive
         let (c, w) = WindowManager.loadConfig(configURL)
         configWarnings = w
@@ -425,7 +467,8 @@ final class WindowManager {
         }
         tap.setBindings(model.config.modes[model.mode] ?? [:], trackMouseMoves: model.config.focusFollowsMouse,
                         floatingModifier: model.config.floatingModifier, capsLock: caps,
-                        interceptFullscreen: model.config.interceptNativeFullscreen)
+                        interceptFullscreen: model.config.interceptNativeFullscreen,
+                        oneShot: model.config.oneShotModes.contains(model.mode))
         updateStatus()
     }
 
@@ -459,10 +502,31 @@ final class WindowManager {
             case .immersive(let t):
                 chrome.set(t == .toggle ? !chrome.isImmersive : t == .enable)
                 updateStatus()
+            case .switcher: DispatchQueue.main.async { self.openSwitcher() }
             }
         }
     }
 
+    /// The window switcher, on the focused monitor. Picking a window goes to its workspace and focuses it;
+    /// dismissing it gives the keyboard back to the window that had it.
+    private func openSwitcher() {
+        let m = model.focusedMonitor
+        let screen = NSScreen.screens.first {
+            ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == m.id
+        } ?? NSScreen.main ?? NSScreen.screens.first
+        guard let screen else { return }  // no display at all (mid-wake)
+        switcher.show(model.switcherEntries(), on: screen.visibleFrame) { [weak self] id in
+            guard let self else { return }
+            userAsked = true
+            defer { userAsked = false }
+            if let id, model.windows[id] != nil { model.osFocused(id) }
+            lastFocused = nil  // the switcher had the keyboard: always focus again
+            pendingFocus = nil
+            apply()
+        }
+    }
+
+    /// Window hints over every visible window. Picking one focuses it (or swaps it with the focused one); either
     private func exec(_ cmd: String) {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/bin/sh")
