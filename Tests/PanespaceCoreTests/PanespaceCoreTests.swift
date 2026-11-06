@@ -58,6 +58,13 @@ final class TreeTests: XCTestCase {
         XCTAssertEqual(tree, "H[1 9 3]")
     }
 
+    func testOneShotModeParses() {
+        let c = Config.parse("mode --oneshot \"leader\" {\n  bindsym q kill\n}\nbindsym alt+space mode \"leader\"\n")
+        XCTAssertTrue(c.oneShotModes.contains("leader"))
+        XCTAssertEqual(c.modes["leader"]?.count, 1)
+        XCTAssertTrue(c.warnings.isEmpty, "\(c.warnings)")
+    }
+
     func testWindowComesBackToItsTile() {
         add(1, 2, 3)
         let spot = m.tileSpot(1)!  // leftmost: goes back before 2
@@ -441,6 +448,26 @@ final class MultiMonitorTests: XCTestCase {
         XCTAssertEqual(m.focusedWorkspace.name, "2")
         m.run("focus left")
         XCTAssertEqual(m.focusedWindow?.id, 1)
+    }
+
+    func testWorkspaceOnOtherOutput() {
+        add(1, at: 10)
+        add(2, at: 1500)
+        m.osFocused(1)
+        m.run("workspace number 4 output next")  // new: created on the other monitor
+        XCTAssertEqual(m.visible[2]?.name, "4")
+        XCTAssertEqual(m.visible[1]?.name, "1")
+        XCTAssertEqual(m.focusedWorkspace.name, "4")
+        m.run("focus output left")
+        XCTAssertEqual(m.focusedWorkspace.name, "1")
+        m.run("workspace number 3")                 // a hidden workspace on the main monitor
+        m.run("workspace number 1 output next")     // from main: brought over to the second monitor
+        XCTAssertEqual(m.visible[2]?.name, "1")
+        XCTAssertEqual(m.visible[1]?.name, "3")
+        XCTAssertEqual(m.focusedWorkspace.name, "1")
+        XCTAssertEqual(m.windows[1]?.workspace?.name, "1")
+        m.run("workspace back_and_forth")
+        XCTAssertEqual(m.focusedWorkspace.name, "3")
     }
 
     func testDisplayFallsBackToItsLastWorkspace() {

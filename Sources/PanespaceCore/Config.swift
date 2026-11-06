@@ -17,6 +17,9 @@ public struct Assignment {
 /// an existing i3 config mostly just works.
 public struct Config {
     public var modes: [String: [KeyCombo: String]] = ["default": [:]]
+    /// Modes declared `mode --oneshot "name" {`: one key, then back to default. A key the mode doesn't bind
+    /// just leaves it (and is swallowed). Made for a leader key.
+    public var oneShotModes: Set<String> = []
     public var gaps = Gaps()
     public var smartGaps = false
     public var defaultOrientation = DefaultOrientation.auto
@@ -208,6 +211,7 @@ public struct Config {
                 }
                 modeStack.append(name)
                 c.modes[name, default: [:]] = c.modes[name] ?? [:]
+                if args.contains("--oneshot") { c.oneShotModes.insert(name) }
 
             case "gaps":
                 guard a.count >= 2, let v = Double(a[1].replacingOccurrences(of: "px", with: "")) else {

@@ -425,7 +425,8 @@ final class WindowManager {
         }
         tap.setBindings(model.config.modes[model.mode] ?? [:], trackMouseMoves: model.config.focusFollowsMouse,
                         floatingModifier: model.config.floatingModifier, capsLock: caps,
-                        interceptFullscreen: model.config.interceptNativeFullscreen)
+                        interceptFullscreen: model.config.interceptNativeFullscreen,
+                        oneShot: model.config.oneShotModes.contains(model.mode))
         updateStatus()
     }
 

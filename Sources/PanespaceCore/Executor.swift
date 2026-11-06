@@ -131,6 +131,19 @@ extension Model {
             }
             if let dst { switchTo(dst) }
 
+        case .workspaceOnOutput(let t, let o):
+            // One monitor (or no such output): an ordinary switch.
+            guard let m = resolveOutput(o) ?? monitor(focusedWorkspace.monitorID),
+                  let dst = resolveWorkspace(t, create: true) else { break }
+            if dst.monitorID != m.id {
+                place(dst, on: m)
+                if dst !== focusedWorkspace { previousWorkspaceName = focusedWorkspace.name }
+                focusedWorkspace = dst
+                gc()
+            } else {
+                switchTo(dst)
+            }
+
         case .split(let o):
             guard let node, node.parent != nil else { break }
             ws.split(node, o ?? node.parent!.layout.orientation.opposite)
@@ -233,6 +246,13 @@ extension Model {
 
     func moveWorkspace(_ ws: Workspace, to t: OutputTarget) {
         guard let m = resolveOutput(t), m.id != ws.monitorID else { return }
+        place(ws, on: m)
+        focusedWorkspace = ws
+        gc()
+    }
+
+    /// Shows `ws` on monitor `m`. The monitor it leaves, if it was showing it, shows another workspace.
+    func place(_ ws: Workspace, on m: Monitor) {
         let oldID = ws.monitorID
         ws.homeMonitor = m.name  // the user put it there
         let wasVisible = isVisible(ws)
@@ -245,8 +265,6 @@ extension Model {
                 ?? left.first
                 ?? makeWorkspace(name: initialWorkspaceName(for: old), on: old)
         }
-        focusedWorkspace = ws
-        gc()
     }
 
     func focusDirection(_ dir: Direction, from node: Node?, in ws: Workspace) {

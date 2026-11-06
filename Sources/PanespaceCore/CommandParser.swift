@@ -45,6 +45,9 @@ public enum Command: Equatable {
     case movePositionCenter
     case scratchpadShow
     case workspace(WorkspaceTarget, noAutoBackAndForth: Bool)
+    /// panespace: `workspace number 3 output next` shows that workspace on that monitor, bringing it over if it
+    /// lives on another one.
+    case workspaceOnOutput(WorkspaceTarget, OutputTarget)
     case split(Orientation?)  // nil = toggle
     case layout(LayoutArg)
     case fullscreen(Toggle)
@@ -223,6 +226,9 @@ public enum CommandParser {
             }
 
         case "workspace":
+            if let o = a.lastIndex(where: { $0.lowercased() == "output" }), o > 0, o + 1 < a.count {
+                return .workspaceOnOutput(try workspace(Array(a[..<o])).0, try output(Array(a[(o + 1)...])))
+            }
             let (t, noAuto) = try workspace(a)
             return .workspace(t, noAutoBackAndForth: noAuto)
 
