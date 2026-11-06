@@ -93,6 +93,9 @@ final class WindowManager {
     private let tap = EventTap()
     private let statusBar = StatusBar()
     private let border = FocusBorder()
+    let stats = Stats()
+    /// When the command being applied was asked for (key press or CLI), to time it to the first frame.
+    private var commandAt: Double?
     let chrome = MacChrome()
 
     private let axQueue = DispatchQueue(label: "panespace.ax", qos: .userInteractive)
@@ -218,7 +221,7 @@ final class WindowManager {
     func start() {
         _ = refcon
         AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), 1.0)
-        tap.onCommand = { [unowned self] in runCommand($0) }
+        tap.onCommand = { [unowned self] cmd, at in runCommand(cmd, keyAt: at) }
         tap.onMouseUp = { [unowned self] in mouseUp() }
         tap.onMouseDown = { [unowned self] in clicked(at: $0) }
         tap.onMouseMoved = { [unowned self] in mouseMoved($0) }
@@ -271,14 +274,24 @@ final class WindowManager {
         NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification,
                                                object: nil, queue: .main) { [unowned self] _ in screensChanged() }
 
-        // Safety net for ghosts and windows that never announce themselves. Runs off the main thread.
-        timers.append(Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [unowned self] _ in requestSync(.all) })
-        timers.append(Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [unowned self] _ in
+        // Idle cost: no app is asked anything unless something changed. Once in a while, a full sweep as a
+        // safety net for ghosts; in between, a cheap look at the window server's list (no app involved) spots
+        // windows that appeared or vanished without telling us, and only their apps get scanned.
+        let sweep = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [unowned self] _ in
+            requestSync(.all)
+            pruneStale()
+            stats.sampleCPU()
+        }
+        sweep.tolerance = 5
+        let tick = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [unowned self] _ in
+            watchWindowServer()
             let s = IsSecureEventInputEnabled()
             if s != secureInput { secureInput = s; updateStatus() }
             saveSession()  // only writes when something moved; survives crashes and kills
             checkSpaces()
-        })
+        }
+        tick.tolerance = 0.5  // lets macOS batch our wake-ups with others
+        timers += [sweep, tick]
 
         statusBar.install(manager: self)
         checkSpaces()
@@ -315,6 +328,56 @@ final class WindowManager {
             }
         }
         hiddenByUs.removeAll()
+    }
+
+    /// Drops bookkeeping for windows that are no longer managed. `forget` clears all of it when a window goes;
+    /// this catches anything a path missed, so a long-running daemon can't slowly collect stale entries
+    /// (or act on a stale one if macOS reuses the window ID).
+    private func pruneStale() {
+        let live = Set(model.windows.keys)
+        let before = elements.count + lastApplied.count + seenFrame.count + settling.count + rulesRun.count
+        func keep<V>(_ d: inout [WindowID: V]) { d = d.filter { live.contains($0.key) } }
+        keep(&elements); keep(&pids); keep(&lastApplied); keep(&appliedSize); keep(&reappliedAt); keep(&fights)
+        keep(&rulesRun); keep(&missing); keep(&dragged); keep(&seenFrame); keep(&appFullscreen); keep(&settling)
+        settling = settling.filter { $0.value > Date() }
+        hiddenByUs.formIntersection(live)
+        unsure.formIntersection(live)
+        animating.formIntersection(live)
+        liveFrames.keep(live)
+        let server = Set(windowServerSnapshot().keys)
+        if !server.isEmpty {
+            fullscreenSkipped.formIntersection(server)
+            nativeFullscreen.formIntersection(server)
+            parked = parked.filter { server.contains($0.key) && $0.value.until > Date() }
+        }
+        if debug {
+            let after = elements.count + lastApplied.count + seenFrame.count + settling.count + rulesRun.count
+            if after != before { log("pruned \(before - after) stale per-window entries") }
+        }
+    }
+
+    /// On-screen normal windows → their app, as of the last look.
+    private var serverWindows: [CGWindowID: pid_t] = [:]
+
+    /// Diffs the window server's on-screen list (one local call, no app is asked) and scans just the apps
+    /// whose windows came or went. Catches windows that never announce themselves, and tab switches.
+    private func watchWindowServer() {
+        guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
+            as? [[String: Any]] else { return }
+        let me = getpid()
+        var now: [CGWindowID: pid_t] = [:]
+        now.reserveCapacity(serverWindows.count)
+        for d in list where d[kCGWindowLayer as String] as? Int == 0 {
+            guard let n = d[kCGWindowNumber as String] as? Int, let p = d[kCGWindowOwnerPID as String] as? Int,
+                  pid_t(p) != me else { continue }
+            now[CGWindowID(n)] = pid_t(p)
+        }
+        guard now != serverWindows else { return }
+        var changed = Set<pid_t>()
+        for (id, p) in now where serverWindows[id] == nil { changed.insert(p) }
+        for (id, p) in serverWindows where now[id] == nil { changed.insert(p) }
+        serverWindows = now
+        if !changed.isEmpty { requestSync(.apps(changed)) }
     }
 
     private func saveSession() {
@@ -370,7 +433,10 @@ final class WindowManager {
 
     /// Never touches another app synchronously: model update, then the AX work is queued.
     @discardableResult
-    func runCommand(_ text: String) -> CommandResult {
+    func runCommand(_ text: String, keyAt: Double? = nil) -> CommandResult {
+        stats.command()
+        commandAt = keyAt ?? CACurrentMediaTime()
+        defer { commandAt = nil }
         userAsked = true  // a key, the menu or the CLI: allowed to take the user out of a full-screen Space
         defer { userAsked = false }
         let modeBefore = model.mode
@@ -424,6 +490,9 @@ final class WindowManager {
             return IPC.json((model.config.modes[model.mode] ?? [:]).map { ["key": $0.key.description, "command": $0.value] })
         case "get_config": return IPC.json(["path": configURL.path, "warnings": configWarnings])
         case "get_version": return IPC.json(["version": panespaceVersion])
+        case "get_stats":
+            return IPC.json(stats.json(windows: model.windows.count, workspaces: model.workspaces.count,
+                                       displays: model.monitors.count))
         default: return IPC.json(["success": false, "error": "unknown message type '\(type)'"])
         }
     }
@@ -435,6 +504,10 @@ final class WindowManager {
         AXUIElementGetPid(el, &pid)  // local, no round trip to the app
         switch n {
         case kAXWindowMovedNotification, kAXWindowResizedNotification:
+            // Our own animation frames echo back here, per window per frame. Drop them before the 3 AX reads below
+            // compete with the apps (and our own writes) for nothing.
+            if !animating.isEmpty || !settling.isEmpty, let id = elements.first(where: { CFEqual($0.value, el) })?.key,
+               animating.contains(id) || (settling[id].map { Date() < $0 } ?? false) { return }
             let resized = n == kAXWindowResizedNotification
             eventQueue.async { [weak self] in
                 guard let id = el.windowID else { return }
@@ -720,6 +793,7 @@ final class WindowManager {
 
     private func screensSettled() {
         model.setMonitors(Screens.read())
+        Vsync.shared.displaysChanged()
         lastApplied.removeAll()
         appliedSize.removeAll()
         seenFrame.removeAll()
@@ -1017,12 +1091,13 @@ final class WindowManager {
                     if existing[pid] == nil { result.newTrackers[pid] = t }
                 }
             }
+            let ms = Double(DispatchTime.now().uptimeNanoseconds - started) / 1e6
             DispatchQueue.main.async {
                 guard let self else { return }
+                self.stats.sync(ms)
                 if self.debug {
                     log(String(format: "sync %@ %d windows in %.2f ms (off main), unanswered: %@", "\(scope)",
-                               result.seen.count, Double(DispatchTime.now().uptimeNanoseconds - started) / 1e6,
-                               "\(result.failedPids)"))
+                               result.seen.count, ms, "\(result.failedPids)"))
                 }
                 self.finishSync(scope, result)
             }
@@ -1217,6 +1292,8 @@ final class WindowManager {
         }
         var show: [pid_t: [Job]] = [:]
         var hide: [pid_t: [Job]] = [:]
+        /// Still sliding out from the animation in flight: parked by this layout if it replaces that animation.
+        var leaving: [pid_t: [Job]] = [:]
         var moves: [Move] = []
         // In flight already and still headed the same way: only moved again if this layout restarts the animation.
         var carried: [Move] = []
@@ -1265,16 +1342,25 @@ final class WindowManager {
                 hiddenByUs.remove(id)
                 model.clearDirty(id)
             case .hidden(let mid):
-                if wasHidden { continue }
+                if wasHidden {
+                    if animating.contains(id) {
+                        leaving[pid, default: []].append(Job(id: id, el: el, action: .hide(mid, knownWidth: appliedSize[id]?.width,
+                                                                                          readFrame: false)))
+                    }
+                    continue
+                }
                 if animated, let s = slides[mid] {  // its workspace was switched away: slide out, then park
-                    var m = Move(id: id, el: el, pid: pid, start: w.isFloating ? .current : origin(id), by: s.exit)
+                    // A floating window's real frame is its home, unless it's mid-flight (still sliding in).
+                    let inFlight = animating.contains(id)
+                    var m = Move(id: id, el: el, pid: pid, start: w.isFloating && !inFlight ? .current : origin(id), by: s.exit)
+                    if w.isFloating, inFlight { m.start = .live(w.floatingFrame) }
                     m.park = mid
                     m.parkWidth = appliedSize[id]?.width
-                    m.readFrame = w.isFloating
+                    m.readFrame = w.isFloating && !inFlight
                     moves.append(m)
                 } else {
                     hide[pid, default: []].append(Job(id: id, el: el, action: .hide(mid, knownWidth: appliedSize[id]?.width,
-                                                                                     readFrame: w.isFloating)))
+                                                                                     readFrame: w.isFloating && !animating.contains(id))))
                 }
                 hiddenByUs.insert(id)
                 lastApplied[id] = nil
@@ -1283,7 +1369,10 @@ final class WindowManager {
         // Anything else to write replaces the running animation, so it has to carry that one's windows on;
         // otherwise the running animation is left to finish delivering them.
         let restart = !moves.isEmpty || !show.isEmpty || !hide.isEmpty
-        if restart { moves += carried }
+        if restart {
+            moves += carried
+            for (pid, jobs) in leaving { hide[pid, default: []] += jobs }
+        }
 
         var focusJob: (pid: pid_t, id: WindowID, el: AXUIElement, gen: Int)?
         let mates = model.focusedWindow.map { model.tabMates($0.id).compactMap { elements[$0] } } ?? []
@@ -1323,6 +1412,7 @@ final class WindowManager {
             let moving = moves.map(\.id)
             let debug = self.debug
             let queued = CACurrentMediaTime()
+            let (askedAt, stats) = (commandAt, self.stats)
             axQueue.async { [weak self] in
                 let waited = CACurrentMediaTime() - queued
                 func focus() {
@@ -1339,6 +1429,7 @@ final class WindowManager {
                 // animation doesn't wait for the focus change to start.
                 if !moves.isEmpty { DispatchQueue.global(qos: .userInteractive).async(execute: focus) }
                 var written = WindowManager.write(show, monitors: monitors)
+                let shownAt = CACurrentMediaTime()
                 // Park the old workspace only once the new one is really on screen; otherwise apps that are slow
                 // to move (tens of ms) leave a frame of bare desktop in between: the "flicker".
                 WindowManager.waitUntilShown(arriving, timeout: 0.08)
@@ -1347,6 +1438,11 @@ final class WindowManager {
                 let glide = Animator.run(moves, duration: duration, gen: gen, generation: anims, store: store, monitors: monitors)
                 written.floating += glide.floating
                 written.oversized += glide.oversized
+                if let askedAt {  // a key or CLI command: how long until windows started moving
+                    let first = !show.isEmpty ? shownAt : (glide.firstFrameAt ?? CACurrentMediaTime())
+                    stats.latency((first - askedAt) * 1000)
+                }
+                if !moves.isEmpty { stats.animation(frames: glide.frames, seconds: glide.seconds, slowest: glide.slowest) }
                 if debug, !moves.isEmpty {
                     log(String(format: "animated %d windows: queue %.1f ms, setup %.1f ms, %d frames, slowest %.1f ms",
                                moves.count, waited * 1000, glide.setup * 1000, glide.frames, glide.slowest * 1000))

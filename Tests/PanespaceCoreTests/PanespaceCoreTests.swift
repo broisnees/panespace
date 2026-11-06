@@ -668,12 +668,32 @@ final class ParserTests: XCTestCase {
 }
 
 final class MotionTests: XCTestCase {
-    func testEaseAndLerp() {
-        XCTAssertEqual(Motion.ease(0), 0)
-        XCTAssertEqual(Motion.ease(1), 1)
-        XCTAssertGreaterThan(Motion.ease(0.5), 0.9)  // ease-out: most of the way by halfway
-        XCTAssertEqual(Motion.lerp(CGRect(x: 0, y: 0, width: 100, height: 100), CGRect(x: 100, y: 50, width: 200, height: 100), 0.5),
-                       CGRect(x: 50, y: 25, width: 150, height: 100))
+    func testSpringLandsWithoutOvershoot() {
+        let spring = Motion.Spring(duration: 0.25)
+        let from = Motion.vector(CGRect(x: 0, y: 0, width: 500, height: 500))
+        let to = Motion.vector(CGRect(x: 1000, y: 0, width: 250, height: 500))
+        var last = -1.0
+        for i in 0...50 {
+            let x = spring.state(from: from, velocity: .zero, to: to, at: Double(i) * 0.01).position
+            XCTAssertGreaterThanOrEqual(x[0], last)       // only ever moves toward the target
+            XCTAssertLessThanOrEqual(x[0], 1000)          // never past it
+            XCTAssertGreaterThanOrEqual(x[2], 250)        // shrinking never undershoots either
+            last = x[0]
+        }
+        let start = spring.state(from: from, velocity: .zero, to: to, at: 0)
+        XCTAssertEqual(start.position, from)              // starts where it is, at rest: no jump
+        XCTAssertEqual(start.velocity, .zero)
+        XCTAssertLessThan(Motion.peak(spring.state(from: from, velocity: .zero, to: to, at: 0.25).position - to), 10)
+    }
+
+    func testSpringKeepsVelocityWhenRetargeted() {
+        // Mid-flight toward the right, the target moves back left: it carries on briefly, then turns, smoothly.
+        let spring = Motion.Spring(duration: 0.25)
+        let v = SIMD4<Double>(3000, 0, 0, 0)
+        let s = spring.state(from: .zero, velocity: v, to: .zero, at: 0)
+        XCTAssertEqual(s.velocity, v)
+        XCTAssertGreaterThan(spring.state(from: .zero, velocity: v, to: .zero, at: 0.02).position[0], 0)
+        XCTAssertEqual(Motion.rect(SIMD4(10.4, 20.6, 100.2, 50.5)), CGRect(x: 10, y: 21, width: 100, height: 51))
     }
 
     func testSlideDirection() {

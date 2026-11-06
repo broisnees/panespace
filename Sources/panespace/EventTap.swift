@@ -5,7 +5,8 @@ import PanespaceCore
 /// Global hotkeys + mouse tracking via a CGEventTap on its own thread, so a slow AX call on the
 /// main thread never delays typing. Needs only the Accessibility permission.
 final class EventTap {
-    var onCommand: (String) -> Void = { _ in }
+    /// A bound key's command, and when the key was pressed (`CACurrentMediaTime`), for `panespace stats`.
+    var onCommand: (String, Double) -> Void = { _, _ in }
     var onMouseUp: () -> Void = {}
     /// A left click the app receives (not a floating_modifier drag), at its screen point.
     var onMouseDown: (CGPoint) -> Void = { _ in }
@@ -145,7 +146,8 @@ final class EventTap {
                 cmd = "fullscreen toggle"
             }
             if let cmd {
-                DispatchQueue.main.async { self.onCommand(cmd) }
+                let t = CACurrentMediaTime()
+                DispatchQueue.main.async { self.onCommand(cmd, t) }
                 return nil  // swallow
             }
             if capsHeld { return nil }  // Caps held + unbound key: do nothing rather than type the letter

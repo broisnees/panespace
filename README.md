@@ -90,7 +90,8 @@ Run `panespace check-config` to find mistakes, and `panespace list-windows` to s
 ```sh
 panespace msg workspace 3
 panespace msg '[app="Safari"] focus'
-panespace msg -t get_tree        # get_workspaces, get_config, get_version, …
+panespace msg -t get_tree        # get_workspaces, get_config, get_version, get_stats, …
+panespace stats                  # key-to-frame latency, frame rate, scan times, CPU, memory
 ```
 
 ## Caps
@@ -100,7 +101,7 @@ panespace msg -t get_tree        # get_workspaces, get_config, get_version, …
 ## How it works
 
 - Panespace uses the Accessibility API only. Windows on hidden workspaces are moved to the corner of the screen, so switching workspaces is a single move per window.
-- Animations write every frame to all windows together, one thread per app, and take their timing from the clock: a slow app drops frames but never delays the layout. A new change interrupts a running animation and carries on from where each window is.
+- Windows move on a critically damped spring: they start from rest, land softly and never overshoot into a neighbour. Each frame is written to every window in step with the display refresh, with screen updates held until the whole frame is in, so neighbours never gap or overlap mid-move. A new change interrupts a running animation and carries each window on from where it is, at the same speed.
 - The layout tree, config parser and command engine are a plain Swift module (`PanespaceCore`) with unit tests.
 - The main thread never waits on another app. Window moves run on background queues, one thread per app, so one frozen app can't stall the rest.
 - If an app won't shrink below a minimum size, its neighbours make room instead of overlapping it.
