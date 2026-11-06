@@ -319,6 +319,7 @@ final class WindowManager {
 
         statusBar.install(manager: self)
         watchConfig()
+        inputSourceObserver = KeyboardLayout.observe { [weak self] in self?.inputSourceChanged() }
         checkSpaces()
         if let want = model.config.immersive { chrome.set(want) }
         requestSync(.all)
@@ -427,7 +428,14 @@ final class WindowManager {
             try? DefaultConfig.text.write(to: url, atomically: true, encoding: .utf8)
         }
         let text = (try? String(contentsOf: url, encoding: .utf8)) ?? DefaultConfig.text
-        let c = Config.parse(text)
+        // Key names mean US positions unless the config lets them follow the keyboard layout, which is only known
+        // once it's parsed: parse again with the layout if it's on (parsing takes well under a millisecond).
+        Keys.layout = nil
+        var c = Config.parse(text)
+        if c.keyLayoutFollowsInput, let layout = KeyboardLayout.current() {
+            Keys.layout = layout
+            c = Config.parse(text)
+        }
         return (c, c.warnings)
     }
 
@@ -468,6 +476,18 @@ final class WindowManager {
         src.setCancelHandler { close(fd) }
         src.resume()
         configWatcher = src
+    }
+
+    private var inputSourceObserver: NSObjectProtocol?
+
+    /// Another keyboard layout was picked: bindings follow it (when `key_layout auto`).
+    private func inputSourceChanged() {
+        guard model.config.keyLayoutFollowsInput, KeyboardLayout.current() != Keys.layout else { return }
+        let (c, w) = WindowManager.loadConfig(configURL)
+        configWarnings = w
+        model.setConfig(c)
+        applyBindings()
+        log("keyboard layout changed; bindings follow it")
     }
 
     func reload() {

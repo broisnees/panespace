@@ -29,6 +29,7 @@
 - **Menu bar.** Shows the current workspace. Its menu switches workspaces, floats or fullscreens the focused window, changes the layout, and edits settings.
 - **Immersive mode.** Auto-hides the macOS menu bar, so windows fill the whole display. The Dock is left to its own macOS setting.
 - **Multi-monitor.** Move focus, windows and whole workspaces between displays; the menu bar follows the focused window. Workspaces return to their display when it's plugged back in.
+- **Any keyboard layout.** Bindings mean the key that types the letter, on AZERTY, Dvorak or Colemak too (`key_layout qwerty` for US key positions).
 - **CLI.** `panespace msg …` works like `i3-msg`.
 
 ## Install

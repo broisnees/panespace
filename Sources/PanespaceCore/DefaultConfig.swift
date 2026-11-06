@@ -31,6 +31,7 @@ focus_wrapping yes
 mouse_warping output          # move the mouse along when focus jumps to another monitor
 floating_modifier $mod        # hold it and drag: left = move, right = resize. A box shows where a tiled window lands.
 focus_follows_mouse no
+key_layout auto               # keys follow your keyboard layout (AZERTY, Dvorak…); "qwerty" = US key positions
 smooth_layout yes             # workspace switches without a flash of empty desktop
 animations yes                # windows glide when the layout changes
 animation_duration 180        # milliseconds until a move looks finished (it moves on a spring)

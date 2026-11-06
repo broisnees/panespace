@@ -31,6 +31,9 @@ public struct Config {
     /// `urgent` stay put. Cmd-Tab always goes there.
     public var focusOnActivation = "focus"
     public var mouseWarping = true
+    /// `key_layout auto` (default): key names follow the current keyboard layout (`Keys.layout`).
+    /// `key_layout qwerty`: they always mean the US key positions.
+    public var keyLayoutFollowsInput = true
     public var focusWrapping = true
     public var accordionPadding: CGFloat = 30
     public var floatingModifier: Modifiers?
@@ -263,6 +266,11 @@ public struct Config {
             case "workspace_auto_back_and_forth": c.autoBackAndForth = bool(a.first)
             case "focus_follows_mouse": c.focusFollowsMouse = bool(a.first)
             case "mouse_warping": c.mouseWarping = a.first != "none"
+            case "key_layout":
+                let v = a.first?.lowercased() ?? ""
+                if ["auto", "current"].contains(v) { c.keyLayoutFollowsInput = true }
+                else if ["qwerty", "us", "physical"].contains(v) { c.keyLayoutFollowsInput = false }
+                else { c.warnings.append("key_layout: expected auto or qwerty, got '\(v)'") }
             case "focus_on_window_activation":
                 if let v = a.first?.lowercased(), ["focus", "smart", "urgent", "none"].contains(v) {
                     c.focusOnActivation = v == "smart" ? "urgent" : v

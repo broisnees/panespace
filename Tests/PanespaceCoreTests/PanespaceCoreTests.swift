@@ -712,6 +712,30 @@ final class MultiMonitorTests: XCTestCase {
     }
 }
 
+final class KeyLayoutTests: XCTestCase {
+    override func tearDown() { Keys.layout = nil }
+
+    func testBindingsFollowTheKeyboardLayout() {
+        // AZERTY: A and Q swap places, digits are typed with shift (1 is shift+&), no [ key without AltGr.
+        Keys.layout = ["q": 0x00, "a": 0x0C, "z": 0x0D, "w": 0x06, "&": 0x12, "1": 0x12, "é": 0x13, "2": 0x13]
+        XCTAssertEqual(KeyCombo.parse("alt+a")?.keyCode, 0x0C)
+        XCTAssertEqual(KeyCombo.parse("alt+q")?.keyCode, 0x00)
+        XCTAssertEqual(KeyCombo.parse("alt+shift+2")?.keyCode, 0x13)
+        XCTAssertEqual(KeyCombo.parse("alt+bracketleft")?.keyCode, 0x21)  // not typable: US position
+        XCTAssertEqual(KeyCombo.parse("alt+space")?.keyCode, 0x31)        // not a character: unchanged
+        XCTAssertEqual(KeyCombo.parse("alt+1")?.description, "alt+1")     // shown as what the binding says
+        XCTAssertEqual(Keys.name(for: 0x0C), "a")
+        Keys.layout = nil
+        XCTAssertEqual(KeyCombo.parse("alt+a")?.keyCode, 0x00)
+    }
+
+    func testKeyLayoutOption() {
+        XCTAssertTrue(Config.parse("").keyLayoutFollowsInput)
+        XCTAssertFalse(Config.parse("key_layout qwerty").keyLayoutFollowsInput)
+        XCTAssertFalse(Config.parse("key_layout bogus").warnings.isEmpty)
+    }
+}
+
 final class ParserTests: XCTestCase {
     func testDefaultConfigParsesCleanly() {
         let c = Config.parse(DefaultConfig.text)
