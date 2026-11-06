@@ -234,12 +234,15 @@ extension Model {
     func moveWorkspace(_ ws: Workspace, to t: OutputTarget) {
         guard let m = resolveOutput(t), m.id != ws.monitorID else { return }
         let oldID = ws.monitorID
+        ws.homeMonitor = m.name  // the user put it there
         let wasVisible = isVisible(ws)
         translateFloating(ws, from: monitor(oldID), to: m)
         ws.monitorID = m.id
         visible[m.id] = ws
         if wasVisible, let old = monitor(oldID) {
-            visible[oldID] = workspaces.first { $0.monitorID == oldID && $0 !== ws && !$0.isEmpty }
+            let left = workspaces.filter { $0.monitorID == oldID && $0 !== ws && !$0.isEmpty }
+            visible[oldID] = recentlyShown.lazy.compactMap { name in left.first { $0.name == name } }.first
+                ?? left.first
                 ?? makeWorkspace(name: initialWorkspaceName(for: old), on: old)
         }
         focusedWorkspace = ws

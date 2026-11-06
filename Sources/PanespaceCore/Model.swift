@@ -78,11 +78,27 @@ public final class Model {
         monitors = ms.sorted { ($0.frame.minX, $0.frame.minY) < ($1.frame.minX, $1.frame.minY) }
         let ids = Set(ms.map(\.id))
         for id in visible.keys where !ids.contains(id) { visible[id] = nil }
+        // Displaced: its display is gone. It keeps its home, to go back when the display returns.
         for ws in workspaces where !ids.contains(ws.monitorID) {
             let target = assignedMonitor(for: ws.name) ?? mainMonitor
             translateFloating(ws, from: old.first { $0.id == ws.monitorID }, to: target)
             ws.monitorID = target.id
         }
+        // Back home: a display came back (or was re-identified), so its workspaces return to it.
+        let added = monitors.filter { m in !old.contains { $0.id == m.id } }
+        for m in added {
+            for ws in workspaces where ws.monitorID != m.id {
+                let pinned = assignedMonitor(for: ws.name)
+                guard pinned?.id == m.id || (pinned == nil && ws.homeMonitor == m.name) else { continue }
+                let from = monitor(ws.monitorID)
+                if visible[ws.monitorID] === ws { visible[ws.monitorID] = nil }
+                translateFloating(ws, from: from, to: m)
+                ws.monitorID = m.id
+                if visible[m.id] == nil || visible[m.id]?.isEmpty == true, !ws.isEmpty { visible[m.id] = ws }
+            }
+        }
+        // A display whose shown workspace left with the others shows another of its own.
+        for (mid, ws) in visible where ws.monitorID != mid { visible[mid] = nil }
         for m in [mainMonitor] + monitors.filter({ !$0.isMain && $0.id != mainMonitor.id }) where visible[m.id] == nil {
             if let ws = workspaces.first(where: { $0.monitorID == m.id && !$0.isEmpty }) {
                 visible[m.id] = ws
@@ -90,7 +106,9 @@ public final class Model {
                 visible[m.id] = makeWorkspace(name: initialWorkspaceName(for: m), on: m)
             }
         }
-        if focusedWorkspace == nil || !isVisible(focusedWorkspace) { focusedWorkspace = visible[mainMonitor.id] }
+        if focusedWorkspace == nil || !isVisible(focusedWorkspace) {
+            focusedWorkspace = visible[focusedWorkspace?.monitorID ?? mainMonitor.id] ?? visible[mainMonitor.id]
+        }
         gc()
     }
 
@@ -158,6 +176,7 @@ public final class Model {
     @discardableResult
     func makeWorkspace(name: String, on m: Monitor) -> Workspace {
         let ws = Workspace(name: name, monitorID: m.id, layout: defaultLayout(for: m))
+        ws.homeMonitor = m.name
         workspaces.append(ws)
         return ws
     }
@@ -169,7 +188,7 @@ public final class Model {
     }
 
     func initialWorkspaceName(for m: Monitor) -> String {
-        let assigned = config.workspaceOutputs.keys.sorted().filter { assignedMonitor(for: $0)?.id == m.id }
+        let assigned = config.workspaceOutputOrder.filter { assignedMonitor(for: $0)?.id == m.id }
         if let n = assigned.first(where: { workspace(named: $0) == nil }) { return n }
         var i = 1
         while workspaces.contains(where: { $0.number == i }) || config.workspaceOutputs[String(i)] != nil
@@ -198,6 +217,8 @@ public final class Model {
     /// Shows `ws` (on its own monitor) and focuses it.
     func switchTo(_ ws: Workspace) {
         guard ws !== focusedWorkspace else { return }
+        noteShown(focusedWorkspace)
+        noteShown(ws)
         previousWorkspaceName = focusedWorkspace.name
         if !isVisible(ws) {
             if monitor(ws.monitorID) == nil { ws.monitorID = focusedMonitor.id }
@@ -205,6 +226,14 @@ public final class Model {
         }
         focusedWorkspace = ws
         gc()
+    }
+
+    /// Workspace names, most recently shown first: what a display falls back to when its workspace leaves.
+    var recentlyShown: [String] = []
+    func noteShown(_ ws: Workspace) {
+        recentlyShown.removeAll { $0 == ws.name }
+        recentlyShown.insert(ws.name, at: 0)
+        if recentlyShown.count > 32 { recentlyShown.removeLast() }
     }
 
     /// Drops empty workspaces nobody is looking at.
@@ -245,7 +274,8 @@ public final class Model {
     /// `workspaceName` (restored session state) overrides both and `assign` rules.
     @discardableResult
     public func addWindow(_ id: WindowID, info: WindowInfo, floating: Bool, frame: CGRect?,
-                          useMonitorOfFrame: Bool = false, workspaceName: String? = nil) -> WindowNode {
+                          useMonitorOfFrame: Bool = false, workspaceName: String? = nil,
+                          near neighbor: WindowID? = nil, before: Bool = false) -> WindowNode {
         if let w = windows[id] { return w }
         let w = WindowNode(id: id, info: info)
         windows[id] = w
@@ -265,6 +295,8 @@ public final class Model {
             w.floatingWorkspace = ws
             w.floatingFrame = frame
             ws.floating.append(w)
+        } else if let n = neighbor.flatMap({ windows[$0] }), n.workspace === ws, !n.isFloating {
+            ws.attachTiled(w, near: n, before: before)  // back where it was
         } else {
             ws.attachTiled(w)
         }
@@ -283,6 +315,41 @@ public final class Model {
     }
 
     public func updateInfo(_ id: WindowID, _ info: WindowInfo) { windows[id]?.info = info }
+
+    /// Where a tiled window sits, so it can come back to the same place (after full screen, minimize, hide):
+    /// a neighbouring window and which side of it.
+    public func tileSpot(_ id: WindowID) -> (neighbor: WindowID, before: Bool)? {
+        guard let w = windows[id], !w.isFloating, let p = w.parent, let i = w.index else { return nil }
+        func window(_ n: Node, last: Bool) -> WindowNode? {
+            n as? WindowNode ?? (n as? Container).flatMap { last ? $0.windows.last : $0.windows.first }
+        }
+        if i + 1 < p.children.count, let n = window(p.children[i + 1], last: false) { return (n.id, true) }
+        if i > 0, let n = window(p.children[i - 1], last: true) { return (n.id, false) }
+        return nil
+    }
+
+    /// The other windows that show together with `id` in a tabbed or stacked layout: when its tab holds a split,
+    /// all of that split comes to the front, not just the focused window.
+    public func tabMates(_ id: WindowID) -> [WindowID] {
+        guard let w = windows[id], !w.isFloating else { return [] }
+        var n: Node = w
+        while let p = n.parent {
+            if p.layout == .tabbed || p.layout == .stacking {
+                return (n as? Container)?.windows.filter { $0 !== w }.map(\.id) ?? []
+            }
+            n = p
+        }
+        return []
+    }
+
+    /// Another window took `old`'s place on screen (the user picked a different native tab of the same tab
+    /// group): it keeps the same tile, size, focus and workspace. No-op if `new` is already managed.
+    public func replaceWindow(_ old: WindowID, with new: WindowID, info: WindowInfo) {
+        guard old != new, windows[new] == nil, let w = windows.removeValue(forKey: old) else { return }
+        w.id = new
+        w.info = info
+        windows[new] = w
+    }
 
     /// The OS focused a window (click, Cmd-Tab, app activation). Follows it to its workspace.
     public func osFocused(_ id: WindowID) {
@@ -311,6 +378,13 @@ public final class Model {
     }
 
     public func clearDirty(_ id: WindowID) { windows[id]?.floatingFrameDirty = false }
+
+    /// A floating window came back (unhidden, unminimized): put it at the frame it had.
+    public func restoreFloatingFrame(_ id: WindowID, _ f: CGRect) {
+        guard let w = windows[id], w.isFloating else { return }
+        w.floatingFrame = f
+        w.floatingFrameDirty = true
+    }
 
     /// Where every window lives, in visual order, for saving the session. Scratchpad windows have no workspace.
     public func sessionSnapshot() -> [(id: WindowID, workspace: String?, floating: Bool)] {

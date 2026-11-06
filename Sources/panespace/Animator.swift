@@ -165,7 +165,7 @@ enum Animator {
     }
 
     private static func park(_ t: Track, _ mid: MonitorID, monitors: [Monitor], store: FrameStore) {
-        let p = hidePoint(mid, monitors: monitors) { t.move.parkWidth ?? t.to.width }
+        let p = hidePoint(mid, monitors: monitors) { CGSize(width: t.move.parkWidth ?? t.to.width, height: t.to.height) }
         t.move.el.setPosition(p)
         store[t.move.id] = CGRect(origin: p, size: t.to.size)
     }

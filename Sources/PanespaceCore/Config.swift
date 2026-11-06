@@ -23,6 +23,10 @@ public struct Config {
     public var workspaceLayout: Layout?
     public var autoBackAndForth = false
     public var focusFollowsMouse = false
+    /// i3's `focus_on_window_activation`: what happens when an app brings up a window on a workspace you can't
+    /// see (a notification click, Spotlight, an app opening a link). `focus` goes there (default); `none` and
+    /// `urgent` stay put. Cmd-Tab always goes there.
+    public var focusOnActivation = "focus"
     public var mouseWarping = true
     public var focusWrapping = true
     public var accordionPadding: CGFloat = 30
@@ -49,6 +53,8 @@ public struct Config {
     public var rules: [Rule] = []
     public var assignments: [Assignment] = []
     public var workspaceOutputs: [String: [String]] = [:]
+    /// The `workspace … output …` lines' workspaces, in config order (the first free one opens on a display).
+    public var workspaceOutputOrder: [String] = []
     public var warnings: [String] = []
 
     public init() {}
@@ -61,7 +67,7 @@ public struct Config {
     static let ignored: Set<String> = [
         "font", "hide_edge_borders", "new_window", "new_float",
         "title_align", "floating_minimum_size", "floating_maximum_size", "popup_during_fullscreen",
-        "force_display_urgency_hint", "focus_on_window_activation", "show_marks", "ipc-socket", "ipc_socket",
+        "force_display_urgency_hint", "show_marks", "ipc-socket", "ipc_socket",
         "force_focus_wrapping", "for_window_title", "include", "smart_borders", "border_radius", "bindswitch",
         "no_focus", "tiling_drag", "bar", "default_floating_border",
     ]
@@ -246,6 +252,10 @@ public struct Config {
             case "workspace_auto_back_and_forth": c.autoBackAndForth = bool(a.first)
             case "focus_follows_mouse": c.focusFollowsMouse = bool(a.first)
             case "mouse_warping": c.mouseWarping = a.first != "none"
+            case "focus_on_window_activation":
+                if let v = a.first?.lowercased(), ["focus", "smart", "urgent", "none"].contains(v) {
+                    c.focusOnActivation = v == "smart" ? "urgent" : v
+                } else { warn("expected: focus_on_window_activation focus|smart|urgent|none") }
             case "focus_wrapping": c.focusWrapping = a.first != "no" && a.first != "false"
             case "accordion_padding":
                 if let v = a.first.flatMap(Double.init) { c.accordionPadding = CGFloat(v) } else { warn("bad accordion_padding") }
@@ -303,7 +313,9 @@ public struct Config {
                 guard let o = a.firstIndex(of: "output"), o > 0, o + 1 < args.count else {
                     warn("expected: workspace <name> output <output>"); continue
                 }
-                c.workspaceOutputs[args[..<o].joined(separator: " ")] = Array(args[(o + 1)...])
+                let name = args[..<o].joined(separator: " ")
+                if c.workspaceOutputs[name] == nil { c.workspaceOutputOrder.append(name) }
+                c.workspaceOutputs[name] = Array(args[(o + 1)...])
 
             default:
                 if first.hasPrefix("client.") || Config.ignored.contains(first) {

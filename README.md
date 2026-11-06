@@ -25,7 +25,7 @@
 - **Animations.** Windows glide when the layout changes: opening and closing, moving and swapping, resizing, and switching workspaces, which slide like macOS Spaces. Turn them off with `animations no`.
 - **Menu bar.** Shows the current workspace. Its menu switches workspaces, floats or fullscreens the focused window, changes the layout, and edits settings.
 - **Immersive mode.** Auto-hides the macOS menu bar, so windows fill the whole display. The Dock is left to its own macOS setting.
-- **Multi-monitor.** Move focus, windows and whole workspaces between displays.
+- **Multi-monitor.** Move focus, windows and whole workspaces between displays; the menu bar follows the focused window. Workspaces return to their display when it's plugged back in.
 - **CLI.** `panespace msg …` works like `i3-msg`.
 
 ## Install
@@ -107,7 +107,7 @@ panespace msg -t get_tree        # get_workspaces, get_config, get_version, …
 
 ## Limitations
 
-- Windows on other macOS Spaces, and windows in native macOS fullscreen, can't be tiled.
+- Windows on other macOS Spaces can't be tiled. Apps' own full screen (videos, games) works normally: the window steps out of the layout while it's full screen and returns to its tile after.
 - Floating windows aren't kept above tiled ones.
 - Not yet supported: `resize set`, marks, `sticky`, title bars.
 

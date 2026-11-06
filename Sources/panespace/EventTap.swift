@@ -7,6 +7,8 @@ import PanespaceCore
 final class EventTap {
     var onCommand: (String) -> Void = { _ in }
     var onMouseUp: () -> Void = {}
+    /// A left click the app receives (not a floating_modifier drag), at its screen point.
+    var onMouseDown: (CGPoint) -> Void = { _ in }
     var onMouseMoved: (CGPoint) -> Void = { _ in }
     /// floating_modifier + click: begin(resize: right button), move (coalesced), end.
     var onModDrag: (ModDragPhase, CGPoint) -> Void = { _, _ in }
@@ -15,6 +17,9 @@ final class EventTap {
 
     private let lock = NSLock()
     private var bindings: [KeyCombo: String] = [:]
+    private var _lastAppSwitch = Date.distantPast
+    /// When the user last pressed Cmd-Tab (or Cmd-`): an app activation right after it is the user's doing.
+    var lastAppSwitch: Date { lock.withLock { _lastAppSwitch } }
     private var _mouseDown = false
     private var _trackMoves = false
     private var floatingModifier: Modifiers?
@@ -26,6 +31,9 @@ final class EventTap {
     private var tap: CFMachPort?
 
     var isMouseDown: Bool { lock.withLock { _mouseDown } }
+
+    /// Marks the zero-distance mouse move Panespace posts to refresh the cursor (`WindowManager.refreshCursor`).
+    static let cursorRefreshTag: Int64 = 0x7061_6e65  // "pane"
 
     /// The latest left click: how many in a row, and whether the mouse really moved while it was down.
     struct Click {
@@ -107,6 +115,20 @@ final class EventTap {
         switch type {
         case .tapDisabledByTimeout, .tapDisabledByUserInput:
             if let tap { CGEvent.tapEnable(tap: tap, enable: true) }
+            // A button released while the tap was off was never seen: believe the hardware, or a stuck "down"
+            // would hold back every window scan (and a stuck mod-drag would swallow every drag) until next click.
+            let left = CGEventSource.buttonState(.combinedSessionState, button: .left)
+            let right = CGEventSource.buttonState(.combinedSessionState, button: .right)
+            let ended = lock.withLock { () -> Bool in
+                if !left { _mouseDown = false }
+                guard let b = dragButton, !(b == .left ? left : right) else { return false }
+                dragButton = nil
+                return true
+            }
+            if ended {
+                let p = CGEvent(source: nil)?.location ?? .zero
+                DispatchQueue.main.async { self.onModDrag(.end, p) }
+            }
         case .keyDown, .keyUp:
             let code = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
             let capsLock = lock.withLock { self.capsLock }
@@ -115,6 +137,7 @@ final class EventTap {
             }
             guard type == .keyDown else { break }
             let (mods, capsHeld) = modifiers(event)
+            if mods.contains(.command), code == 0x30 || code == 0x32 { lock.withLock { _lastAppSwitch = Date() } }
             var cmd = lock.withLock { bindings[KeyCombo(keyCode: code, modifiers: mods)] }
             // macOS's own full-screen keys (⌃⌘F, Globe+F) would move the app to a separate Space.
             if cmd == nil, code == 0x03, lock.withLock({ interceptFullscreen }),
@@ -145,6 +168,7 @@ final class EventTap {
                 DispatchQueue.main.async { self.onModDrag(.begin(resize: button == .right), p) }
                 return nil  // the app never sees the click
             }
+            if button == .left { DispatchQueue.main.async { self.onMouseDown(p0) } }
         case .leftMouseDragged, .rightMouseDragged:
             // Coalesce: at most one move in flight on the main thread, always with the latest point.
             let p1 = event.location
@@ -181,6 +205,8 @@ final class EventTap {
             }
             if button == .left { DispatchQueue.main.async { self.onMouseUp() } }
         case .mouseMoved:
+            // Panespace's own cursor refresh after a layout change: not the user pointing at something.
+            if event.getIntegerValueField(.eventSourceUserData) == EventTap.cursorRefreshTag { break }
             if lock.withLock({ _trackMoves }) {
                 let p = event.location
                 DispatchQueue.main.async { self.onMouseMoved(p) }

@@ -1,5 +1,6 @@
 import AppKit
 import ApplicationServices
+import PanespaceCore
 
 /// Focusing another app's window from a background agent. Since macOS 14 `activate` is only a
 /// request, so like yabai/alt-tab we use SkyLight when present (loaded via dlsym: fails soft),
@@ -26,7 +27,9 @@ enum Focus {
         t = n
     }
 
-    static func focus(pid: pid_t, windowID: CGWindowID, element: AXUIElement) {
+    /// `current`: still wanted. Checked before the steps that can wait on a busy app, so a focus that was
+    /// overtaken by a newer one never lands after it.
+    static func focus(pid: pid_t, windowID: CGWindowID, element: AXUIElement, current: () -> Bool = { true }) {
         var t = DispatchTime.now().uptimeNanoseconds
         var psn = ProcessSerialNumber()
         var madeKey = false
@@ -50,9 +53,54 @@ enum Focus {
             element.set(kAXMainAttribute, true)
             lap(&t, "axMain")
         }
+        guard current() else { return }
         element.perform(kAXRaiseAction)
         lap(&t, "axRaise")
+        guard current() else { return }
         NSRunningApplication(processIdentifier: pid)?.activate(options: [])
         lap(&t, "activate")
+    }
+}
+
+/// An invisible 1-px key window Panespace shows on a display whose workspace is empty, so macOS moves the menu
+/// bar (and Spotlight, and new windows) to that display. Activating Panespace alone leaves them where the last
+/// key window was, since a menu bar follows its app's key window (AeroSpace #576).
+final class FocusHolder {
+    private final class Pane: NSWindow {
+        override var canBecomeKey: Bool { true }
+        override var canBecomeMain: Bool { true }
+    }
+    private var pane: Pane?
+    private(set) var monitor: MonitorID?
+
+    /// Makes Panespace active with its key window on `id`'s screen.
+    func take(_ id: MonitorID) {
+        let screen = NSScreen.screens.first {
+            ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == id
+        }
+        guard let screen else { return NSApp.activate(ignoringOtherApps: true) }
+        let p = pane ?? {
+            let p = Pane(contentRect: .zero, styleMask: .borderless, backing: .buffered, defer: false)
+            p.isOpaque = false
+            p.backgroundColor = .clear
+            p.hasShadow = false
+            p.ignoresMouseEvents = true
+            p.isReleasedWhenClosed = false
+            p.collectionBehavior = [.moveToActiveSpace, .ignoresCycle, .transient]
+            pane = p
+            return p
+        }()
+        let v = screen.visibleFrame
+        p.setFrame(NSRect(x: v.midX, y: v.midY, width: 1, height: 1), display: false)
+        monitor = id
+        NSApp.activate(ignoringOtherApps: true)
+        p.makeKeyAndOrderFront(nil)
+    }
+
+    /// A real window has focus again.
+    func release() {
+        guard monitor != nil else { return }
+        monitor = nil
+        pane?.orderOut(nil)
     }
 }

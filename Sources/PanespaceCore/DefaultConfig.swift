@@ -70,8 +70,9 @@ bindsym $mod+e layout toggle split
 bindsym $mod+s layout stacking
 bindsym $mod+w layout tabbed
 bindsym $mod+f fullscreen toggle
-# ⌃⌘F, Globe+F and the green button also use panespace fullscreen, so apps never leave your desktop
-# for a separate macOS Space (where they can't be tiled). "native_fullscreen macos" turns this off.
+# Apps' own full screen (a video's fullscreen button, a game's fullscreen mode) works as usual: the window
+# leaves the layout while it's full screen and comes back to its tile after. The green button, ⌃⌘F and Globe+F
+# use panespace fullscreen instead, which keeps the window tiled. "native_fullscreen macos" turns that off.
 native_fullscreen panespace
 # Immersive (Omarchy-style): auto-hide the macOS menu bar so tiles and fullscreen use the whole display.
 # The Dock follows its own macOS setting. Toggle with $mod+Shift+f. "immersive yes" starts in it;
