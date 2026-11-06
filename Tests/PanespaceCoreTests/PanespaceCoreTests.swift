@@ -7,6 +7,9 @@ private let mon1 = Monitor(id: 1, name: "Built-in", frame: CGRect(x: 0, y: 0, wi
 private let mon2 = Monitor(id: 2, name: "DELL U2720Q", frame: CGRect(x: 1000, y: 0, width: 1000, height: 500),
                            visibleFrame: CGRect(x: 1000, y: 0, width: 1000, height: 500), isMain: false)
 
+private let mon3 = Monitor(id: 3, name: "LG", frame: CGRect(x: 2000, y: 0, width: 1000, height: 500),
+                           visibleFrame: CGRect(x: 2000, y: 0, width: 1000, height: 500), isMain: false)
+
 /// Compact tree notation: H[1 V[2 3]] (T = tabbed, S = stacking).
 private func describe(_ n: Node) -> String {
     if let w = n as? WindowNode { return "\(w.id)" }
@@ -245,8 +248,42 @@ final class TreeTests: XCTestCase {
     func testDragDropSwaps() {
         add(1, 2, 3)
         _ = m.placements()
-        m.userDropped(1, at: CGPoint(x: 900, y: 100))
+        m.userDropped(1, at: CGPoint(x: 833, y: 250))  // the middle of 3
         XCTAssertEqual(tree, "H[3 2 1]")
+    }
+
+    func testDragDropBesideAnEdge() {
+        add(1, 2, 3)
+        _ = m.placements()
+        // Near 3's top edge: above it, sharing its slot. The preview is the half it will take.
+        XCTAssertEqual(m.dropTarget(for: 1, at: CGPoint(x: 833, y: 60)),
+                       DropTarget(workspace: "1", zone: .beside(3, .up), preview: CGRect(x: 666, y: 0, width: 334, height: 250)))
+        m.userDropped(1, at: CGPoint(x: 833, y: 60))
+        XCTAssertEqual(tree, "H[2 V[1 3]]")
+        XCTAssertEqual(focused, 1)
+        _ = m.placements()
+        // Near 2's left edge: a sibling before it in the row.
+        m.userDropped(3, at: CGPoint(x: 20, y: 250))
+        XCTAssertEqual(tree, "H[3 2 1]")
+        // Over its own tile: nothing to do.
+        _ = m.placements()
+        XCTAssertNil(m.dropTarget(for: 3, at: CGPoint(x: 100, y: 250)))
+    }
+
+    func testDragDropBesideATabGroup() {
+        add(1, 3)
+        m.osFocused(1)
+        run("split v")
+        add(2)
+        run("layout tabbed")
+        _ = m.placements()
+        XCTAssertEqual(tree, "H[T[1 2] 3]")
+        let group = (m.windows[2]!.parent!).rect
+        let t = m.dropTarget(for: 3, at: CGPoint(x: group.minX + 10, y: group.midY))
+        XCTAssertEqual(t?.zone, .beside(1, .left))  // tab 1's edge peeks out there
+        XCTAssertEqual(t?.preview, CGRect(x: group.minX, y: group.minY, width: (group.width / 2).rounded(), height: group.height))
+        m.userDropped(3, at: CGPoint(x: group.minX + 10, y: group.midY))
+        XCTAssertEqual(tree, "H[3 T[1 2]]")
     }
 
     func testGaps() {
@@ -530,6 +567,73 @@ final class MultiMonitorTests: XCTestCase {
         m.setMonitors([mon1])
         XCTAssertEqual(m.windows[1]?.workspace?.monitorID, 1)
         XCTAssertNotNil(m.visible[1])
+    }
+
+    func testDragDropOntoOtherDisplay() {
+        add(1, at: 10)
+        add(2, at: 10)
+        add(3, at: 1500)
+        _ = m.placements()
+        // Beside a window there: it splits that window's place, and focus follows.
+        m.userDropped(1, at: CGPoint(x: 1980, y: 250))
+        XCTAssertEqual(describe(m.workspace(named: "2")!.root), "H[3 1]")
+        XCTAssertEqual(describe(m.workspace(named: "1")!.root), "H[2]")
+        XCTAssertEqual(m.focusedWorkspace.name, "2")
+        XCTAssertEqual(m.focusedWindow?.id, 1)
+        _ = m.placements()
+        // On the middle of a window there: the two trade places.
+        m.userDropped(2, at: CGPoint(x: 1250, y: 250))
+        XCTAssertEqual(describe(m.workspace(named: "2")!.root), "H[2 1]")
+        XCTAssertEqual(describe(m.workspace(named: "1")!.root), "H[3]")
+        XCTAssertEqual(m.windows[3]?.workspace?.name, "1")
+        XCTAssertEqual(m.focusedWindow?.id, 2)
+        XCTAssertEqual(m.workspace(named: "1")?.focusedWindow?.id, 3)
+    }
+
+    func testDragDropOntoEmptyDisplay() {
+        add(1, at: 10)
+        add(2, at: 10)
+        _ = m.placements()
+        let t = m.dropTarget(for: 1, at: CGPoint(x: 1500, y: 250))
+        XCTAssertEqual(t, DropTarget(workspace: "2", zone: .workspace, preview: mon2.visibleFrame))
+        m.userDropped(1, at: CGPoint(x: 1500, y: 250))
+        XCTAssertEqual(m.windows[1]?.workspace?.name, "2")
+        XCTAssertEqual(m.focusedWindow?.id, 1)
+        // The display it left still has a window: no empty-display target there.
+        _ = m.placements()
+        XCTAssertEqual(m.dropTarget(for: 1, at: CGPoint(x: 500, y: 250))?.zone, .swap(2))
+    }
+
+    func testTabTornOffOntoOtherDisplay() {
+        add(1, at: 10)
+        add(2, at: 1500)
+        m.osFocused(1)
+        _ = m.placements()
+        // Dragged out of window 1 and let go near window 2's right edge, on the other display: beside it there,
+        // not back on the focused display. A torn-off tab never swaps, even over a window's middle.
+        XCTAssertEqual(m.dropTarget(for: nil, at: CGPoint(x: 1980, y: 250))?.zone, .beside(2, .right))
+        XCTAssertEqual(m.dropTarget(for: nil, at: CGPoint(x: 1300, y: 250))?.zone, .beside(2, .left))
+        m.addTornOffWindow(3, info: WindowInfo(app: "A"), at: CGPoint(x: 1980, y: 250))
+        XCTAssertEqual(describe(m.workspace(named: "2")!.root), "H[2 3]")
+        XCTAssertEqual(m.focusedWindow?.id, 3)
+        // Onto an empty display: takes it whole.
+        m.setMonitors([mon1, mon2, mon3])
+        _ = m.placements()
+        m.addTornOffWindow(4, info: WindowInfo(app: "A"), at: CGPoint(x: 2500, y: 250))
+        XCTAssertEqual(m.windows[4]?.workspace?.monitorID, 3)
+        XCTAssertEqual(m.focusedWindow?.id, 4)
+    }
+
+    func testNewFloatingWindowJoinsTheWorkspaceOnItsDisplay() {
+        add(1, at: 10)
+        m.osFocused(1)
+        m.addWindow(5, info: WindowInfo(app: "A"), floating: true, frame: CGRect(x: 1400, y: 100, width: 200, height: 200))
+        XCTAssertEqual(m.windows[5]?.workspace?.name, "2")
+        XCTAssertEqual(m.focusedWorkspace.name, "1")  // opening doesn't take focus by itself
+        XCTAssertEqual(m.placements()[5], .floating(CGRect(x: 1400, y: 100, width: 200, height: 200), apply: false))
+        // Off every display: the focused workspace, as before.
+        m.addWindow(6, info: WindowInfo(app: "A"), floating: true, frame: CGRect(x: 5000, y: 5000, width: 200, height: 200))
+        XCTAssertEqual(m.windows[6]?.workspace?.name, "1")
     }
 
     func testFloatingDropOnOtherMonitor() {

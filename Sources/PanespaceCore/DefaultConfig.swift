@@ -29,7 +29,7 @@ client.focused    #5294e2 #5294e2 #ffffff #5294e2   #5294e2
 workspace_auto_back_and_forth no
 focus_wrapping yes
 mouse_warping output          # move the mouse along when focus jumps to another monitor
-floating_modifier $mod        # hold it and drag: left = move, right = resize. Drop a tiled window on another to swap.
+floating_modifier $mod        # hold it and drag: left = move, right = resize. A box shows where a tiled window lands.
 focus_follows_mouse no
 smooth_layout yes             # workspace switches without a flash of empty desktop
 animations yes                # windows glide when the layout changes

@@ -281,7 +281,10 @@ public final class Model {
         let w = WindowNode(id: id, info: info)
         windows[id] = w
         var ws: Workspace = focusedWorkspace
-        if useMonitorOfFrame, let f = frame, let m = monitor(containing: CGPoint(x: f.midX, y: f.midY)),
+        // At startup every window joins the workspace shown on its display. A new floating window (a dialog, a
+        // panel, picture in picture) stays where its app put it, so it too joins the workspace shown there:
+        // filed under the focused one on another display, it would hover over the wrong workspace.
+        if useMonitorOfFrame || floating, let f = frame, let m = monitor(containing: CGPoint(x: f.midX, y: f.midY)),
            let v = visible[m.id] {
             ws = v
         }
@@ -450,21 +453,6 @@ public final class Model {
             ws.resize(w, axis: .vertical, amount: .px(old.minY - f.minY), towardStart: true, inner: inner)
         } else if abs(f.maxY - old.maxY) > slack {
             ws.resize(w, axis: .vertical, amount: .px(f.maxY - old.maxY), towardStart: false, inner: inner)
-        }
-    }
-
-    /// The user dragged a tiled window and let go at `p`: swap with / move next to the window under it.
-    public func userDropped(_ id: WindowID, at p: CGPoint) {
-        guard let w = windows[id], !w.isFloating, let src = w.workspace else { return }
-        for ws in visible.values {
-            if let t = ws.root.windows.first(where: { $0 !== w && $0.rect.contains(p) }) {
-                if ws === src { src.swap(w, t) } else { moveNode(w, to: ws, anchor: t); setFocus(w) }
-                return
-            }
-        }
-        if let m = monitor(containing: p), let ws = visible[m.id], ws !== src, ws.root.children.isEmpty {
-            moveNode(w, to: ws)
-            setFocus(w)
         }
     }
 

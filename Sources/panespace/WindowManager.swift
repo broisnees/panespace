@@ -93,9 +93,14 @@ final class WindowManager {
     private let tap = EventTap()
     private let statusBar = StatusBar()
     private let border = FocusBorder()
+    private let dropPreview = DropPreview()
     let stats = Stats()
     /// When the command being applied was asked for (key press or CLI), to time it to the first frame.
     private var commandAt: Double?
+    /// An app opened a window during the current drag: a tab being torn off its window. Its drop area shows while
+    /// dragging; window discovery waits for the mouse-up, which `release` remembers to place it there.
+    private var tearOff: pid_t?
+    private var release: (point: CGPoint, at: Date, pid: pid_t?)?
     let chrome = MacChrome()
     private let switcher = SwitcherPanel()
 
@@ -179,6 +184,9 @@ final class WindowManager {
     /// Bumped on every mod-drag begin and end, so a hit test that lands after its drag ended is dropped.
     private var modDragGeneration = 0
     private var lastFocused: WindowID?
+    /// The display `lastFocused` was on when it got focus. Moved to another display, it's focused again there, so
+    /// the menu bar (and Spotlight, and new windows) follow it.
+    private var lastFocusedOn: MonitorID?
     private var pendingFocus: (id: WindowID, until: Date)?
     private var lastFocusedMonitor: MonitorID?
     private let focusHolder = FocusHolder()
@@ -236,6 +244,7 @@ final class WindowManager {
         tap.onMouseUp = { [unowned self] in mouseUp() }
         tap.onMouseDown = { [unowned self] in clicked(at: $0) }
         tap.onMouseMoved = { [unowned self] in mouseMoved($0) }
+        tap.onDrag = { [unowned self] in windowDragged(to: $0) }
         tap.onModDrag = { [unowned self] phase, p in
             switch phase {
             case .begin(let resize): modDragBegan(at: p, resize: resize)
@@ -618,6 +627,7 @@ final class WindowManager {
             }
             requestSync(.apps([pid]))
         default:  // window created/minimized, app hidden/shown
+            if n == kAXWindowCreatedNotification, tap.isMouseDown, tap.click.dragged { tearOff = pid }
             if n == kAXWindowMiniaturizedNotification || n == kAXApplicationHiddenNotification { windowLostAt = Date() }
             requestSync(.apps([pid]))
         }
@@ -639,8 +649,12 @@ final class WindowManager {
             return titleBarZoom(id, click: click.seq)
         }
         // Only a real drag is the user moving or resizing; a still click that moved the window was the app.
+        // Only the window the drag started on (its frame, give or take its resize margin): another window that
+        // happens to move during a text selection or a file drag isn't being dragged.
+        let pressed = (w.isFloating ? w.floatingFrame : lastApplied[id] ?? w.rect)?.insetBy(dx: -10, dy: -10).contains(click.down) ?? false
         if clicking && click.dragged {
             if let live = liveResize, live != id { return }  // our own re-tiling of its neighbours
+            if !pressed { return }
             if resized, !w.isFloating, let f = frame {
                 liveResize = id
                 model.userResized(id, from: seenFrame[id] ?? lastApplied[id], to: f)
@@ -791,6 +805,7 @@ final class WindowManager {
             }
         }
         lastFocused = id
+        lastFocusedOn = w.workspace?.monitorID
         if id != model.focusedWindow?.id {
             model.osFocused(id)
             scheduleApply()
@@ -810,8 +825,21 @@ final class WindowManager {
         }
     }
 
+    /// A tiled window being dragged by its title bar, or a tab being torn off: show where it would land.
+    private func windowDragged(to p: CGPoint) {
+        guard tap.isMouseDown else { return dropPreview.show(nil) }
+        if let id = dragged.first(where: { !$0.value && model.windows[$0.key]?.isFloating == false })?.key {
+            dropPreview.show(model.dropTarget(for: id, at: p)?.preview)
+        } else {
+            dropPreview.show(tearOff == nil ? nil : model.dropTarget(for: nil, at: p)?.preview)
+        }
+    }
+
     private func mouseUp() {
         mouseUpPending = true
+        if tap.click.dragged, let p = CGEvent(source: nil)?.location { release = (p, Date(), tearOff) }
+        tearOff = nil
+        dropPreview.show(nil)
         // Give the window server a beat to settle the final frames, then read them off the main thread.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [self] in
             let targets = dragged.keys.compactMap { id in elements[id].map { (id, $0) } }
@@ -938,6 +966,7 @@ final class WindowManager {
         guard d.resize else {
             let origin = CGPoint(x: f.minX + dx, y: f.minY + dy)
             axQueue.async { d.el.setPosition(origin) }
+            if !d.floating { dropPreview.show(model.dropTarget(for: d.id, at: p)?.preview) }
             return
         }
         let (minW, minH): (CGFloat, CGFloat) = (120, 80)
@@ -986,6 +1015,7 @@ final class WindowManager {
         guard let d = modDrag else { scheduleApply(); return startSync() }
         modDragMoved(to: p)
         modDrag = nil
+        dropPreview.show(nil)
         dragged.removeAll()  // our own frame writes during the drag aren't user drags
         if d.floating {
             axQueue.async { [weak self] in
@@ -1265,7 +1295,15 @@ final class WindowManager {
                 markRulesRun(id)  // rules already ran in the previous session
                 continue
             }
-            model.addWindow(id, info: info, floating: s.kind == .float, frame: s.frame, useMonitorOfFrame: startup)
+            // A tab just torn off its window by dragging: where it was let go, not the focused workspace.
+            if s.kind != .float, let r = release, Date().timeIntervalSince(r.at) < 2,
+               r.pid == s.pid || (s.frame?.insetBy(dx: -24, dy: -24).contains(r.point) ?? false) {
+                release = nil
+                model.addTornOffWindow(id, info: info, at: r.point)
+                if debug { log("torn-off window \(id) (\(info.app)) placed at \(r.point)") }
+            } else {
+                model.addWindow(id, info: info, floating: s.kind == .float, frame: s.frame, useMonitorOfFrame: startup)
+            }
             added.append(id)
             unsure.insert(id)  // it glides in from wherever the app opened it
         }
@@ -1475,10 +1513,12 @@ final class WindowManager {
         // In a full-screen Space (a video, a game), focusing a desktop window would make macOS leave it: leave focus
         // to macOS there; it reports the right window when the user comes back. Only looked up when it matters.
         if let f = model.focusedWindow {
-            if f.id != lastFocused, let el = elements[f.id], let pid = pids[f.id],
+            let on = model.focusedMonitor.id
+            if f.id != lastFocused || on != lastFocusedOn, let el = elements[f.id], let pid = pids[f.id],
                userAsked || !Spaces.summary().activeIsFullscreen {
                 focusHolder.release()
                 lastFocused = f.id
+                lastFocusedOn = on
                 pendingFocus = (f.id, Date().addingTimeInterval(0.6))
                 focusJob = (pid, f.id, el, focusGeneration.increment())
             }
@@ -1534,6 +1574,14 @@ final class WindowManager {
                 let glide = Animator.run(moves, duration: duration, gen: gen, generation: anims, store: store, monitors: monitors)
                 written.floating += glide.floating
                 written.oversized += glide.oversized
+                written.recheck += glide.recheck
+                if !written.recheck.isEmpty {
+                    let again = written.recheck
+                    queue.asyncAfter(deadline: .now() + 0.15) {
+                        guard anims.value == gen else { return }  // a newer layout owns these windows now
+                        WindowManager.recheck(again)
+                    }
+                }
                 if let askedAt {  // a key or CLI command: how long until windows started moving
                     let first = !show.isEmpty ? shownAt : (glide.firstFrameAt ?? CACurrentMediaTime())
                     stats.latency((first - askedAt) * 1000)
@@ -1709,6 +1757,8 @@ final class WindowManager {
         var floating: [(WindowID, CGRect)] = []
         /// Windows that came out bigger than their tile: the app won't go smaller.
         var oversized: [(id: WindowID, actual: CGSize, wanted: CGSize)] = []
+        /// Given a whole new frame (new, shown again at another size, or crossing displays): see `recheck`.
+        var recheck: [(el: AXUIElement, frame: CGRect)] = []
     }
 
     private func afterWrite(_ w: Written) {
@@ -1767,6 +1817,7 @@ final class WindowManager {
                         }
                     } else {
                         job.el.setFrame(r)  // new or crossing monitors: size → position → size
+                        local.recheck.append((job.el, r))
                     }
                     // Asked to get smaller: an app with a minimum size stops short and overlaps its neighbour.
                     // One read to find out, so the layout can make room.
@@ -1787,14 +1838,29 @@ final class WindowManager {
                 }
             }
             if enhanced { app.set("AXEnhancedUserInterface", true) }
-            if !local.floating.isEmpty || !local.oversized.isEmpty {
+            if !local.floating.isEmpty || !local.oversized.isEmpty || !local.recheck.isEmpty {
                 lock.withLock {
                     out.floating += local.floating
                     out.oversized += local.oversized
+                    out.recheck += local.recheck
                 }
             }
         }
         return out
+    }
+
+    /// A window moved to another display takes a moment to learn which display it's on, and until then sizes
+    /// itself against the old one: the last resize of a size → position → size write can land clipped to the old
+    /// display's edge. Look once more and put it right. Runs on `axQueue`.
+    private static func recheck(_ list: [(el: AXUIElement, frame: CGRect)]) {
+        for (el, r) in list {
+            AXUIElementSetMessagingTimeout(el, 0.25)
+            defer { AXUIElementSetMessagingTimeout(el, 0) }
+            guard let f = el.frame else { continue }
+            if abs(f.minX - r.minX) > 2 || abs(f.minY - r.minY) > 2 || abs(f.width - r.width) > 2 || abs(f.height - r.height) > 2 {
+                el.setFrame(r)
+            }
+        }
     }
 
     /// Polls the window server (cheap, no app round trip) until every window is at its target origin.
