@@ -1,20 +1,37 @@
 import CoreGraphics
 import Foundation
 
-/// Pure math for layout animations: easing, interpolation, and which way a workspace switch slides.
+/// Pure math for layout animations: the spring windows move on, and which way a workspace switch slides.
 public enum Motion {
-    /// Ease-out (quartic): a quick start and a gentle landing.
-    public static func ease(_ t: Double) -> Double {
-        let c = min(max(t, 0), 1)
-        return 1 - pow(1 - c, 4)
+    /// A critically damped spring: no overshoot, so a tile never crosses into its neighbour, and a window
+    /// that's already moving keeps its velocity when its target changes mid-flight.
+    public struct Spring {
+        /// Angular frequency.
+        public let omega: Double
+        /// `duration`: about when the motion looks finished (99% of the way there).
+        public init(duration: Double) { omega = 6.64 / max(duration, 0.01) }
+
+        /// Where a value is, and how fast it moves, `t` seconds after leaving `x0` at `v0` for `target`.
+        public func state(from x0: SIMD4<Double>, velocity v0: SIMD4<Double>, to target: SIMD4<Double>,
+                          at t: Double) -> (position: SIMD4<Double>, velocity: SIMD4<Double>) {
+            let c1 = x0 - target, c2 = v0 + omega * c1
+            let e = exp(-omega * t)
+            return (target + (c1 + c2 * t) * e, (c2 - omega * (c1 + c2 * t)) * e)
+        }
     }
 
-    /// The frame `p` of the way from `a` to `b`, on whole points so windows don't shimmer.
-    public static func lerp(_ a: CGRect, _ b: CGRect, _ p: Double) -> CGRect {
-        let k = CGFloat(p)
-        func mix(_ x: CGFloat, _ y: CGFloat) -> CGFloat { (x + (y - x) * k).rounded() }
-        return CGRect(x: mix(a.minX, b.minX), y: mix(a.minY, b.minY), width: mix(a.width, b.width), height: mix(a.height, b.height))
+    /// A frame as (x, y, width, height), the four values a window animates.
+    public static func vector(_ r: CGRect) -> SIMD4<Double> {
+        SIMD4(Double(r.minX), Double(r.minY), Double(r.width), Double(r.height))
     }
+
+    /// Back to a frame, on whole points so windows don't shimmer.
+    public static func rect(_ v: SIMD4<Double>) -> CGRect {
+        CGRect(x: v[0].rounded(), y: v[1].rounded(), width: v[2].rounded(), height: v[3].rounded())
+    }
+
+    /// The largest of the four values' sizes.
+    public static func peak(_ v: SIMD4<Double>) -> Double { max(max(abs(v[0]), abs(v[1])), max(abs(v[2]), abs(v[3]))) }
 
     public struct Slide: Equatable {
         /// Added to a window's target to get where it starts when it slides in.

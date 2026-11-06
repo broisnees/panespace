@@ -38,7 +38,7 @@ public struct Config {
     public var smoothLayout = true
     /// Layout changes glide instead of jumping (`animations no` turns it off).
     public var animations = true
-    /// Seconds a layout animation takes (`animation_duration <ms>`).
+    /// About when a layout animation looks finished, in seconds (`animation_duration <ms>`); it moves on a spring.
     public var animationDuration = 0.18
     /// Menu bar indicator look: number | pill | panes | circle | minimal (current workspace) or segmented | dots | tiles.
     public var workspaceIndicator = "number"

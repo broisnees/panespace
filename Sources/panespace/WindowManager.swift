@@ -435,6 +435,10 @@ final class WindowManager {
         AXUIElementGetPid(el, &pid)  // local, no round trip to the app
         switch n {
         case kAXWindowMovedNotification, kAXWindowResizedNotification:
+            // Our own animation frames echo back here, per window per frame. Drop them before the 3 AX reads below
+            // compete with the apps (and our own writes) for nothing.
+            if !animating.isEmpty || !settling.isEmpty, let id = elements.first(where: { CFEqual($0.value, el) })?.key,
+               animating.contains(id) || (settling[id].map { Date() < $0 } ?? false) { return }
             let resized = n == kAXWindowResizedNotification
             eventQueue.async { [weak self] in
                 guard let id = el.windowID else { return }
@@ -720,6 +724,7 @@ final class WindowManager {
 
     private func screensSettled() {
         model.setMonitors(Screens.read())
+        Vsync.shared.displaysChanged()
         lastApplied.removeAll()
         appliedSize.removeAll()
         seenFrame.removeAll()
@@ -1217,6 +1222,8 @@ final class WindowManager {
         }
         var show: [pid_t: [Job]] = [:]
         var hide: [pid_t: [Job]] = [:]
+        /// Still sliding out from the animation in flight: parked by this layout if it replaces that animation.
+        var leaving: [pid_t: [Job]] = [:]
         var moves: [Move] = []
         // In flight already and still headed the same way: only moved again if this layout restarts the animation.
         var carried: [Move] = []
@@ -1265,16 +1272,25 @@ final class WindowManager {
                 hiddenByUs.remove(id)
                 model.clearDirty(id)
             case .hidden(let mid):
-                if wasHidden { continue }
+                if wasHidden {
+                    if animating.contains(id) {
+                        leaving[pid, default: []].append(Job(id: id, el: el, action: .hide(mid, knownWidth: appliedSize[id]?.width,
+                                                                                          readFrame: false)))
+                    }
+                    continue
+                }
                 if animated, let s = slides[mid] {  // its workspace was switched away: slide out, then park
-                    var m = Move(id: id, el: el, pid: pid, start: w.isFloating ? .current : origin(id), by: s.exit)
+                    // A floating window's real frame is its home, unless it's mid-flight (still sliding in).
+                    let inFlight = animating.contains(id)
+                    var m = Move(id: id, el: el, pid: pid, start: w.isFloating && !inFlight ? .current : origin(id), by: s.exit)
+                    if w.isFloating, inFlight { m.start = .live(w.floatingFrame) }
                     m.park = mid
                     m.parkWidth = appliedSize[id]?.width
-                    m.readFrame = w.isFloating
+                    m.readFrame = w.isFloating && !inFlight
                     moves.append(m)
                 } else {
                     hide[pid, default: []].append(Job(id: id, el: el, action: .hide(mid, knownWidth: appliedSize[id]?.width,
-                                                                                     readFrame: w.isFloating)))
+                                                                                     readFrame: w.isFloating && !animating.contains(id))))
                 }
                 hiddenByUs.insert(id)
                 lastApplied[id] = nil
@@ -1283,7 +1299,10 @@ final class WindowManager {
         // Anything else to write replaces the running animation, so it has to carry that one's windows on;
         // otherwise the running animation is left to finish delivering them.
         let restart = !moves.isEmpty || !show.isEmpty || !hide.isEmpty
-        if restart { moves += carried }
+        if restart {
+            moves += carried
+            for (pid, jobs) in leaving { hide[pid, default: []] += jobs }
+        }
 
         var focusJob: (pid: pid_t, id: WindowID, el: AXUIElement, gen: Int)?
         let mates = model.focusedWindow.map { model.tabMates($0.id).compactMap { elements[$0] } } ?? []

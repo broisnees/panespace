@@ -33,7 +33,7 @@ floating_modifier $mod        # hold it and drag: left = move, right = resize. D
 focus_follows_mouse no
 smooth_layout yes             # workspace switches without a flash of empty desktop
 animations yes                # windows glide when the layout changes
-animation_duration 180        # milliseconds
+animation_duration 180        # milliseconds until a move looks finished (it moves on a spring)
 
 # ── Launch ──────────────────────────────────────────────
 # Pick your terminal: open -na Ghostty | open -na kitty | open -na Alacritty | open -na iTerm
