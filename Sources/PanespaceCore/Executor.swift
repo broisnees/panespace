@@ -41,6 +41,7 @@ extension Model {
         case .reload: return [.reload]
         case .exit: return [.exit]
         case .immersive(let t): return [.immersive(t)]
+        case .switcher: return [.switcher]
         case .kill:
             return node.map { windows(in: $0).map { .close($0.id) } } ?? []
         case .mode(let m):

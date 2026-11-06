@@ -33,6 +33,7 @@ public enum Effect: Equatable {
     case reload
     case exit
     case immersive(Toggle)
+    case switcher
 }
 
 public struct CommandResult {

@@ -56,6 +56,8 @@ public enum Command: Equatable {
     case balance
     /// panespace: auto-hide the macOS menu bar and Dock so tiles use the whole screen (Omarchy-style).
     case immersive(Toggle)
+    /// panespace: a search box over every window (type, arrows, Return to jump to it).
+    case switcher
     case kill
     case reload
     case exit
@@ -183,6 +185,7 @@ public enum CommandParser {
         case "exit": return .exit
         case "balance": return .balance
         case "immersive": return .immersive(try toggle(arg(0) ?? "toggle"))
+        case "switcher": return .switcher
         case "mode":
             guard let m = a.first else { throw ParseError("mode needs a name") }
             return .mode(m)

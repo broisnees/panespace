@@ -22,6 +22,7 @@
 - **Instant workspaces.** Panespace keeps its own workspaces, separate from macOS Spaces. Switching has no animation.
 - **i3 config syntax.** `bindsym`, modes, `for_window` / `assign` rules, gaps, scratchpad, `back_and_forth`.
 - **Mouse.** Drag the edge between two windows and both resize live. Drop a window on another to swap them. Double-click a title bar to zoom that window to the full screen; double-click again to put it back.
+- **Window switcher.** `switcher` searches every window by app, title or workspace.
 - **Animations.** Windows glide when the layout changes: opening and closing, moving and swapping, resizing, and switching workspaces, which slide like macOS Spaces. Turn them off with `animations no`.
 - **Menu bar.** Shows the current workspace. Its menu switches workspaces, floats or fullscreens the focused window, changes the layout, and edits settings.
 - **Immersive mode.** Auto-hides the macOS menu bar, so windows fill the whole display. The Dock is left to its own macOS setting.
@@ -59,6 +60,7 @@ Before you start:
 | `$mod+w` / `$mod+s` / `$mod+e` | Tabbed / stacking / toggle split |
 | `$mod+f` / `$mod+Shift+f` | Fullscreen / immersive mode |
 | `$mod+Shift+space` | Float or tile the window |
+| `$mod+/` | Search all windows |
 | `$mod+r` | Resize mode: `hjkl` or arrows, `b` to balance, Esc to leave |
 | `$mod+Shift+q` | Close the window |
 | `$mod+Shift+c` / `$mod+Shift+e` | Reload the config / quit |

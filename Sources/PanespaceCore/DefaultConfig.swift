@@ -52,6 +52,7 @@ bindsym $mod+Right focus right
 bindsym $mod+a focus parent
 bindsym $mod+Shift+a focus child
 bindsym $mod+space focus mode_toggle
+bindsym $mod+slash switcher               # search every window by app or title
 
 # ── Move ────────────────────────────────────────────────
 bindsym $mod+Shift+h move left

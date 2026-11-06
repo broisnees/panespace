@@ -97,6 +97,7 @@ final class WindowManager {
     /// When the command being applied was asked for (key press or CLI), to time it to the first frame.
     private var commandAt: Double?
     let chrome = MacChrome()
+    private let switcher = SwitcherPanel()
 
     private let axQueue = DispatchQueue(label: "panespace.ax", qos: .userInteractive)
     private let syncQueue = DispatchQueue(label: "panespace.sync", qos: .userInitiated)
@@ -501,10 +502,31 @@ final class WindowManager {
             case .immersive(let t):
                 chrome.set(t == .toggle ? !chrome.isImmersive : t == .enable)
                 updateStatus()
+            case .switcher: DispatchQueue.main.async { self.openSwitcher() }
             }
         }
     }
 
+    /// The window switcher, on the focused monitor. Picking a window goes to its workspace and focuses it;
+    /// dismissing it gives the keyboard back to the window that had it.
+    private func openSwitcher() {
+        let m = model.focusedMonitor
+        let screen = NSScreen.screens.first {
+            ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == m.id
+        } ?? NSScreen.main ?? NSScreen.screens.first
+        guard let screen else { return }  // no display at all (mid-wake)
+        switcher.show(model.switcherEntries(), on: screen.visibleFrame) { [weak self] id in
+            guard let self else { return }
+            userAsked = true
+            defer { userAsked = false }
+            if let id, model.windows[id] != nil { model.osFocused(id) }
+            lastFocused = nil  // the switcher had the keyboard: always focus again
+            pendingFocus = nil
+            apply()
+        }
+    }
+
+    /// Window hints over every visible window. Picking one focuses it (or swaps it with the focused one); either
     private func exec(_ cmd: String) {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/bin/sh")
