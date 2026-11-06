@@ -753,3 +753,65 @@ final class IndicatorConfigTests: XCTestCase {
         XCTAssertEqual(bad.warnings.count, 1)
     }
 }
+
+final class SwipeTests: XCTestCase {
+    func testHorizontalSwipeTracksAndEnds() {
+        var r = SwipeRecognizer(fingers: 4)
+        XCTAssertEqual(r.frame(count: 4, x: 0.5, y: 0.5, t: 0), [])
+        XCTAssertEqual(r.frame(count: 4, x: 0.51, y: 0.5, t: 0.01), [])  // under the threshold
+        XCTAssertEqual(r.frame(count: 4, x: 0.46, y: 0.5, t: 0.02), [.horizontalBegan, .horizontal(0)])
+        let moved = r.frame(count: 4, x: 0.36, y: 0.51, t: 0.04)
+        guard case .horizontal(let d)? = moved.first, moved.count == 1 else { return XCTFail("\(moved)") }
+        XCTAssertEqual(d, -0.1, accuracy: 1e-9)
+        let end = r.frame(count: 3, x: 0.36, y: 0.5, t: 0.05)
+        guard case .horizontalEnded(let travel, let v)? = end.first else { return XCTFail("\(end)") }
+        XCTAssertEqual(travel, -0.1, accuracy: 1e-9)
+        XCTAssertLessThan(v, 0)  // moving left
+        XCTAssertEqual(r.frame(count: 3, x: 0.2, y: 0.5, t: 0.06), [])  // stays done until every finger lifts
+        XCTAssertEqual(r.frame(count: 0, x: 0, y: 0, t: 0.07), [])
+        XCTAssertEqual(r.frame(count: 4, x: 0.5, y: 0.5, t: 0.08), [])  // a fresh swipe can start
+    }
+
+    func testVerticalSwipesFireOnce() {
+        var r = SwipeRecognizer(fingers: 4)
+        _ = r.frame(count: 4, x: 0.5, y: 0.5, t: 0)
+        XCTAssertEqual(r.frame(count: 4, x: 0.5, y: 0.6, t: 0.02), [.up])
+        XCTAssertEqual(r.frame(count: 4, x: 0.5, y: 0.8, t: 0.04), [])
+        _ = r.frame(count: 0, x: 0, y: 0, t: 0.05)
+        _ = r.frame(count: 4, x: 0.5, y: 0.5, t: 0.06)
+        XCTAssertEqual(r.frame(count: 4, x: 0.51, y: 0.4, t: 0.08), [.down])
+    }
+
+    func testOtherFingerCountsAreIgnored() {
+        var r = SwipeRecognizer(fingers: 4)
+        for i in 0..<10 { XCTAssertEqual(r.frame(count: 3, x: 0.5 - Double(i) * 0.05, y: 0.5, t: Double(i) * 0.01), []) }
+    }
+
+    func testRubberBandAndCommit() {
+        XCTAssertEqual(Motion.rubberBand(0, dimension: 1000), 0)
+        XCTAssertLessThan(Motion.rubberBand(1000, dimension: 1000), 400)  // a full screen of drag moves < 40%
+        XCTAssertLessThan(Motion.rubberBand(-500, dimension: 1000), 0)
+        XCTAssertTrue(Motion.commits(progress: 0.4, velocity: 0))
+        XCTAssertFalse(Motion.commits(progress: 0.2, velocity: 0.1))
+        XCTAssertTrue(Motion.commits(progress: 0.1, velocity: 1.0))   // a flick
+        XCTAssertFalse(Motion.commits(progress: 0.5, velocity: -1.0)) // flicked back
+    }
+
+    func testAdjacentWorkspaceAndHiddenFrames() {
+        let m = Model(config: Config(), monitors: [mon1])
+        m.addWindow(1, info: WindowInfo(app: "A"), floating: false, frame: nil)
+        m.run("workspace 3")
+        m.addWindow(2, info: WindowInfo(app: "B"), floating: false, frame: nil)
+        XCTAssertEqual(m.adjacentWorkspace(forward: false)?.name, "1")
+        XCTAssertNil(m.adjacentWorkspace(forward: true))
+        let one = m.workspace(named: "1")!
+        XCTAssertEqual(m.frames(of: one, on: mon1)[1], CGRect(x: 0, y: 0, width: 1000, height: 500))
+    }
+
+    func testGestureConfig() {
+        let c = Config.parse("gestures no\ngesture_fingers 3")
+        XCTAssertFalse(c.gestures)
+        XCTAssertEqual(c.gestureFingers, 3)
+        XCTAssertEqual(Config.parse("gesture_fingers 5").warnings.count, 1)
+    }
+}

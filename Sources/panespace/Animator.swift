@@ -276,6 +276,67 @@ enum Animator {
         return result
     }
 
+    struct Follower {
+        let id: WindowID
+        let el: AXUIElement
+        let pid: pid_t
+        /// Where it sits at offset 0.
+        let base: CGRect
+        /// Parked at another size: put it at its base first (off-screen), since the follow only moves.
+        let resize: Bool
+    }
+
+    /// Moves windows with the fingers during a workspace swipe: each display refresh, every window sits at its
+    /// base frame shifted sideways by the swipe's current offset (position writes only, so it's cheap and
+    /// smooth). Runs until the swipe ends or a newer layout takes over, and leaves each window's position and
+    /// speed in `store`, so the spring that follows carries on at the fingers' speed.
+    static func follow(_ windows: [Follower], track: SwipeTrack, gen: Int, generation: Counter, store: FrameStore) {
+        guard !windows.isEmpty else { return }
+        let groups = Dictionary(grouping: windows, by: { $0.pid }).map { ($0.key, $0.value) }
+        let writers = groups.map { Writer($0.0) }
+        for w in windows {
+            AXUIElementSetMessagingTimeout(w.el, 0.1)
+            if w.resize { w.el.setFrame(w.base) }
+        }
+        Vsync.shared.begin()
+        var last = Double.nan
+        var history: [(t: Double, x: Double)] = []
+        var velocity = 0.0
+        while true {
+            Vsync.shared.wait()
+            let (raw, finished) = track.state
+            if finished || generation.value != gen { break }
+            let offset = raw.rounded()
+            let now = CACurrentMediaTime()
+            history.append((now, offset))
+            history.removeAll { now - $0.t > 0.06 }
+            if let a = history.first, now - a.t > 0.005 { velocity = (offset - a.x) / (now - a.t) }
+            guard offset != last else { continue }
+            last = offset
+            ScreenUpdates.hold {
+                let wrote = DispatchGroup()
+                for (g, w) in writers.enumerated() where w.claim() {
+                    let frames = groups[g].1.map { ($0.el, $0.base.offsetBy(dx: offset, dy: 0).origin) }
+                    wrote.enter()
+                    w.queue.async {
+                        for (el, p) in frames { el.setPosition(p) }
+                        w.release()
+                        wrote.leave()
+                    }
+                }
+                _ = wrote.wait(timeout: .now() + budget)
+            }
+            for w in windows { store[w.id] = Kinetic(frame: w.base.offsetBy(dx: offset, dy: 0), velocity: SIMD4(velocity, 0, 0, 0)) }
+        }
+        Vsync.shared.end()
+        for w in writers { w.queue.sync {} }
+        let at = last.isNaN ? 0 : last
+        for w in windows {
+            store[w.id] = Kinetic(frame: w.base.offsetBy(dx: at, dy: 0), velocity: SIMD4(velocity, 0, 0, 0))
+            AXUIElementSetMessagingTimeout(w.el, 0)
+        }
+    }
+
     /// Writes one frame. Growing moves first and then grows, shrinking shrinks first and then moves, so the
     /// window never pokes past its final edges; an unchanged size is a single position write.
     private static func step(_ t: Track, to r: CGRect) {
