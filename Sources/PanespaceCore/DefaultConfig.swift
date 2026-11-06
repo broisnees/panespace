@@ -34,6 +34,8 @@ focus_follows_mouse no
 smooth_layout yes             # workspace switches without a flash of empty desktop
 animations yes                # windows glide when the layout changes
 animation_duration 180        # milliseconds until a move looks finished (it moves on a spring)
+gestures yes                  # trackpad: swipe sideways to switch workspace, up/down to zoom the window
+gesture_fingers 4             # 3 or 4; turn off macOS's own swipes with the same count (System Settings → Trackpad)
 
 # ── Launch ──────────────────────────────────────────────
 # Pick your terminal: open -na Ghostty | open -na kitty | open -na Alacritty | open -na iTerm

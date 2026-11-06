@@ -172,11 +172,17 @@ final class StatusBar: NSObject, NSMenuDelegate {
         let anim = menuItem("Animations", #selector(toggleAnimations))
         anim.state = model.config.animations ? .on : .off
         sub.addItem(anim)
+        let swipes = menuItem("Trackpad Gestures", #selector(toggleGestures))
+        swipes.state = model.config.gestures ? .on : .off
+        swipes.toolTip = "\(model.config.gestureFingers)-finger swipes: sideways switches workspace, up/down zooms the window"
+        sub.addItem(swipes)
         let login = menuItem("Open at Login", #selector(toggleLogin))
         login.state = LoginItem.isEnabled ? .on : .off
         sub.addItem(login)
         sub.addItem(.separator())
         sub.addItem(choices("Modifier Key", key: "set $mod", current: configValue("set $mod"), StatusBar.modifiers))
+        sub.addItem(choices("Swipe Fingers", key: "gesture_fingers", current: String(model.config.gestureFingers),
+                            [("3", "3 Fingers"), ("4", "4 Fingers (macOS uses 3 for Spaces by default)")]))
         sub.addItem(choices("Menu Bar Indicator", key: "workspace_indicator", current: model.config.workspaceIndicator,
                             StatusBar.indicators))
         sub.addItem(.separator())
@@ -312,6 +318,10 @@ final class StatusBar: NSObject, NSMenuDelegate {
 
     @objc private func toggleAnimations() {
         writeSetting("animations", manager?.model.config.animations == true ? "no" : "yes")
+    }
+
+    @objc private func toggleGestures() {
+        writeSetting("gestures", manager?.model.config.gestures == true ? "no" : "yes")
     }
 
     @objc private func toggleLogin() {

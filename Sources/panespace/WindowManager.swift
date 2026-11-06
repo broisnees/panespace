@@ -152,6 +152,16 @@ final class WindowManager {
     private var holdApplyUntil = Date.distantPast
     /// The title-bar double-click that already became a zoom.
     private var zoomedClick = 0
+    // Trackpad gestures.
+    private var trackpad: Trackpad?
+    private let swipeTrack = SwipeTrack()
+    /// A sideways swipe in progress: the workspaces either side, and (when windows follow the fingers live)
+    /// where those neighbours' windows wait off-screen.
+    private var swipe: (monitor: Monitor, prev: Workspace?, next: Workspace?, homes: [WindowID: CGRect])?
+    /// After a swipe that didn't switch to them: where the neighbours' windows go back to before parking.
+    private var swipeHomes: [WindowID: CGRect] = [:]
+    /// The next apply follows a swipe's end.
+    private var swipeJustEnded = false
     /// Windows their app made cover a whole display (a game's or player's borderless full screen), and that
     /// frame. Panespace leaves them be until the app shrinks them again.
     private var appFullscreen: [WindowID: CGRect] = [:]
@@ -270,7 +280,10 @@ final class WindowManager {
             checkSpaces()
         }
         nc.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [unowned self] _ in
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self.screensChanged() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+                self.screensChanged()
+                self.updateTrackpad(restart: true)  // trackpads can stop reporting after sleep
+            }
         }
         NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification,
                                                object: nil, queue: .main) { [unowned self] _ in screensChanged() }
@@ -315,6 +328,8 @@ final class WindowManager {
 
     /// Puts every window we parked off-screen back where the user can reach it.
     func restoreAllWindows() {
+        swipeTrack.finish()  // a swipe in progress only ends when main says so: end it, or the wait below never returns
+        _ = animGeneration.increment()
         axQueue.sync {}  // let queued moves finish first
         for id in hiddenByUs {
             guard let el = elements[id], let w = model.windows[id] else { continue }
@@ -469,6 +484,7 @@ final class WindowManager {
                         floatingModifier: model.config.floatingModifier, capsLock: caps,
                         interceptFullscreen: model.config.interceptNativeFullscreen,
                         oneShot: model.config.oneShotModes.contains(model.mode))
+        updateTrackpad()
         updateStatus()
     }
 
@@ -1042,7 +1058,7 @@ final class WindowManager {
         applyQueued = true
         DispatchQueue.main.asyncAfter(deadline: .now() + max(0, holdApplyUntil.timeIntervalSinceNow)) { [self] in
             applyQueued = false
-            if tap.isMouseDown || modDrag != nil { return }  // never fight a drag; mouse-up applies
+            if tap.isMouseDown || modDrag != nil || swipe != nil { return }  // never fight a drag or swipe; their end applies
             apply()
         }
     }
@@ -1379,7 +1395,9 @@ final class WindowManager {
                 if unchanged && !animating.contains(id) { continue }
                 if animated {
                     var m = Move(id: id, el: el, pid: pid, start: origin(id), to: r)
-                    if wasHidden {  // its workspace just came on screen: slide in, or just appear
+                    if wasHidden && animating.contains(id) {
+                        m.start = .live(nil)  // a swipe already brought it on screen, moving with the fingers
+                    } else if wasHidden {  // its workspace just came on screen: slide in, or just appear
                         let s = slides[w.workspace?.monitorID ?? 0]
                         m.start = .at(s.map { r.offsetBy(dx: $0.enter.dx, dy: $0.enter.dy) } ?? r)
                         // Parked at its tile's size: the first frame moves it straight from the corner. Only a
@@ -1396,8 +1414,15 @@ final class WindowManager {
                 appliedSize[id] = r.size
                 hiddenByUs.remove(id)
             case .floating(let f, let dirty):
-                if !dirty && !wasHidden { continue }
-                if animated, wasHidden, let f, let s = slides[w.workspace?.monitorID ?? 0] {
+                let inFlight = animating.contains(id)
+                if !dirty && !wasHidden && !inFlight { continue }
+                if animated, !dirty, !wasHidden, let f, inFlight {
+                    carried.append(Move(id: id, el: el, pid: pid, start: .live(nil), to: f))  // e.g. moved by a swipe
+                    continue
+                }
+                if animated, wasHidden, let f, inFlight {
+                    moves.append(Move(id: id, el: el, pid: pid, start: .live(nil), to: f))
+                } else if animated, wasHidden, let f, let s = slides[w.workspace?.monitorID ?? 0] {
                     moves.append(Move(id: id, el: el, pid: pid, start: .at(f.offsetBy(dx: s.enter.dx, dy: s.enter.dy)), to: f,
                                       jump: appliedSize[id] != f.size))
                 } else {
@@ -1407,7 +1432,11 @@ final class WindowManager {
                 model.clearDirty(id)
             case .hidden(let mid):
                 if wasHidden {
-                    if animating.contains(id) {
+                    // A swipe that didn't land here pulled it on screen: back where it waited, then parked.
+                    if animated, animating.contains(id), let home = swipeHomes[id] {
+                        moves.append(Move(id: id, el: el, pid: pid, start: .live(nil), to: home, park: mid,
+                                          parkWidth: appliedSize[id]?.width))
+                    } else if animating.contains(id) {
                         leaving[pid, default: []].append(Job(id: id, el: el, action: .hide(mid, knownWidth: appliedSize[id]?.width,
                                                                                           readFrame: false)))
                     }
@@ -1430,9 +1459,12 @@ final class WindowManager {
                 lastApplied[id] = nil
             }
         }
+        swipeHomes = [:]
         // Anything else to write replaces the running animation, so it has to carry that one's windows on;
         // otherwise the running animation is left to finish delivering them.
-        let restart = !moves.isEmpty || !show.isEmpty || !hide.isEmpty
+        // A finished swipe left windows where the fingers did: nothing else delivers them, so always restart.
+        let restart = !moves.isEmpty || !show.isEmpty || !hide.isEmpty || swipeJustEnded
+        swipeJustEnded = false
         if restart {
             moves += carried
             for (pid, jobs) in leaving { hide[pid, default: []] += jobs }
@@ -1544,6 +1576,112 @@ final class WindowManager {
             out[mid] = slide
         }
         return out
+    }
+
+    // MARK: Trackpad gestures
+
+    /// Starts, restarts or stops listening to the trackpad to match the config.
+    private func updateTrackpad(restart: Bool = false) {
+        let c = model.config
+        if !c.gestures || restart || trackpad?.fingers != c.gestureFingers {
+            trackpad?.stop()
+            trackpad = nil
+        }
+        guard c.gestures, trackpad == nil else { return }
+        let t = Trackpad(fingers: c.gestureFingers) { [weak self] e in self?.trackpadEvent(e) }
+        if t.start() {
+            trackpad = t
+            log("gestures: \(c.gestureFingers)-finger swipes on")
+        } else {
+            log("gestures: no trackpad found")
+        }
+    }
+
+    /// On the touch thread. The live offset goes straight to the follow loop; the rest hops to main.
+    private func trackpadEvent(_ e: SwipeRecognizer.Event) {
+        switch e {
+        case .horizontalBegan:
+            swipeTrack.reset()
+            DispatchQueue.main.async { self.swipeBegan() }
+        case .horizontal(let travel):
+            swipeTrack.move(travel)
+        case .horizontalEnded(let travel, let velocity):
+            swipeTrack.move(travel)
+            DispatchQueue.main.async { self.swipeEnded(velocity: velocity) }
+        case .up: DispatchQueue.main.async { self.zoomGesture(true) }
+        case .down: DispatchQueue.main.async { self.zoomGesture(false) }
+        }
+    }
+
+    /// Sideways swipe: the current workspace and its neighbours move with the fingers, like Spaces. With no
+    /// room beside the display (another display there) or animations off, it just switches on lift.
+    private func swipeBegan() {
+        guard swipe == nil, modDrag == nil, !tap.isMouseDown, let mon = model.monitor(model.focusedWorkspace.monitorID) else { return }
+        let ws: Workspace = model.focusedWorkspace
+        let (prev, next) = (model.adjacentWorkspace(forward: false), model.adjacentWorkspace(forward: true))
+        let width = Double(mon.frame.width)
+        let gain = 1.8 * width  // about half the trackpad's width is a whole screen
+        let (hasPrev, hasNext) = (prev != nil, next != nil)
+        swipeTrack.setMap { travel in
+            let x = travel * gain
+            // Fingers right bring the previous workspace in, left the next; with nothing there, it resists.
+            if (x > 0 && !hasPrev) || (x < 0 && !hasNext) { return Motion.rubberBand(x, dimension: width) }
+            return max(-width, min(width, x))
+        }
+        let live = model.config.animations && model.config.animationDuration > 0
+            && Motion.slide(on: mon, among: model.monitors, forward: true)?.enter.dy == 0
+        var homes: [WindowID: CGRect] = [:]
+        var followers: [Animator.Follower] = []
+        if live {
+            for w in ws.allWindows {
+                guard let el = elements[w.id], let pid = pids[w.id],
+                      let base = w.isFloating ? w.floatingFrame : (lastApplied[w.id] ?? w.rect) else { continue }
+                followers.append(.init(id: w.id, el: el, pid: pid, base: base, resize: false))
+            }
+            for (side, other) in [(-width, prev), (width, next)] {
+                guard let other else { continue }
+                for (id, r) in model.frames(of: other, on: mon) {
+                    guard let el = elements[id], let pid = pids[id] else { continue }
+                    let base = r.offsetBy(dx: side, dy: 0)
+                    homes[id] = base
+                    followers.append(.init(id: id, el: el, pid: pid, base: base, resize: appliedSize[id] != r.size))
+                }
+            }
+        }
+        swipe = (mon, prev, next, homes)
+        border.hide()
+        guard !followers.isEmpty else { return }
+        animating.formUnion(followers.map(\.id))
+        let gen = animGeneration.increment()
+        let (track, anims, store) = (swipeTrack, animGeneration, liveFrames)
+        axQueue.async { Animator.follow(followers, track: track, gen: gen, generation: anims, store: store) }
+    }
+
+    /// Fingers lifted: switch if the swipe went far or fast enough, else spring back. Either way, every window
+    /// carries on from where the fingers left it, at their speed.
+    private func swipeEnded(velocity: Double) {
+        guard let s = swipe else { return }
+        swipe = nil
+        let offset = swipeTrack.state.offset
+        swipeTrack.finish()
+        let width = Double(s.monitor.frame.width)
+        let speed = velocity * 1.8  // screens per second, + = fingers moving right
+        let target = offset < 0 ? s.next : (offset > 0 ? s.prev : nil)
+        let toward = offset < 0 ? -speed : speed
+        if let target, Motion.commits(progress: abs(offset) / width, velocity: toward) {
+            model.run("workspace \"\(target.name.replacingOccurrences(of: "\"", with: "\\\""))\"")
+        }
+        swipeHomes = s.homes
+        swipeJustEnded = true
+        apply()
+    }
+
+    /// Swipe up: zoom the focused window to the full screen; down: put it back.
+    private func zoomGesture(_ up: Bool) {
+        guard swipe == nil, let w = model.focusedWindow, !w.isFloating else { return }
+        guard up != (w.workspace?.fullscreen === w) else { return }
+        model.run("fullscreen toggle", on: w.id)
+        scheduleApply()
     }
 
     /// The animation landed. Its windows' late move notifications are still ours for a moment.

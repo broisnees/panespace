@@ -43,6 +43,10 @@ public struct Config {
     public var animations = true
     /// About when a layout animation looks finished, in seconds (`animation_duration <ms>`); it moves on a spring.
     public var animationDuration = 0.18
+    /// Trackpad swipes: sideways switches workspace (windows follow the fingers), up/down zooms.
+    public var gestures = true
+    /// How many fingers a swipe takes (3 or 4). Pick the count macOS isn't using for its own swipes.
+    public var gestureFingers = 4
     /// Menu bar indicator look: number | pill | panes | circle | minimal (current workspace) or segmented | dots | tiles.
     public var workspaceIndicator = "number"
     /// nil = leave the macOS menu bar/Dock alone; true/false = set immersive mode at startup.
@@ -246,6 +250,9 @@ public struct Config {
             case "native_fullscreen": c.interceptNativeFullscreen = a.first != "macos"
             case "smooth_layout": c.smoothLayout = bool(a.first)
             case "animations": c.animations = bool(a.first)
+            case "gestures": c.gestures = bool(a.first)
+            case "gesture_fingers":
+                if let v = a.first.flatMap(Int.init), v == 3 || v == 4 { c.gestureFingers = v } else { warn("expected: gesture_fingers 3|4") }
             case "animation_duration":
                 if let v = a.first.flatMap(Double.init), v >= 0 { c.animationDuration = min(v, 1000) / 1000 } else { warn("bad animation_duration") }
             case "workspace_indicator":

@@ -23,6 +23,7 @@
 - **i3 config syntax.** `bindsym`, modes, `for_window` / `assign` rules, gaps, scratchpad, `back_and_forth`.
 - **Mouse.** Drag the edge between two windows and both resize live. Drop a window on another to swap them. Double-click a title bar to zoom that window to the full screen; double-click again to put it back.
 - **Window switcher.** `switcher` searches every window by app, title or workspace.
+- **Trackpad gestures.** Swipe sideways with four fingers and the workspaces follow your fingers like Spaces, snapping to the nearest one when you lift. Swipe up to zoom the focused window, down to put it back. Set `gesture_fingers 3` to use three, and turn off macOS's own swipes with the same finger count in System Settings → Trackpad → More Gestures.
 - **Animations.** Windows glide when the layout changes: opening and closing, moving and swapping, resizing, and switching workspaces, which slide like macOS Spaces. Turn them off with `animations no`.
 - **Menu bar.** Shows the current workspace. Its menu switches workspaces, floats or fullscreens the focused window, changes the layout, and edits settings.
 - **Immersive mode.** Auto-hides the macOS menu bar, so windows fill the whole display. The Dock is left to its own macOS setting.
@@ -77,6 +78,7 @@ gaps inner 8
 smart_gaps on
 focus_follows_mouse no
 animations yes                     # animation_duration 180 (ms)
+gestures yes                       # gesture_fingers 4 (or 3)
 workspace_indicator number         # menu bar: number | pill | panes | circle | minimal | segmented | dots | tiles
 floating_modifier $mod             # $mod+drag moves, $mod+right-drag resizes
 
