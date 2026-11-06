@@ -271,14 +271,23 @@ final class WindowManager {
         NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification,
                                                object: nil, queue: .main) { [unowned self] _ in screensChanged() }
 
-        // Safety net for ghosts and windows that never announce themselves. Runs off the main thread.
-        timers.append(Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [unowned self] _ in requestSync(.all) })
-        timers.append(Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [unowned self] _ in
+        // Idle cost: no app is asked anything unless something changed. Once in a while, a full sweep as a
+        // safety net for ghosts; in between, a cheap look at the window server's list (no app involved) spots
+        // windows that appeared or vanished without telling us, and only their apps get scanned.
+        let sweep = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [unowned self] _ in
+            requestSync(.all)
+            pruneStale()
+        }
+        sweep.tolerance = 5
+        let tick = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [unowned self] _ in
+            watchWindowServer()
             let s = IsSecureEventInputEnabled()
             if s != secureInput { secureInput = s; updateStatus() }
             saveSession()  // only writes when something moved; survives crashes and kills
             checkSpaces()
-        })
+        }
+        tick.tolerance = 0.5  // lets macOS batch our wake-ups with others
+        timers += [sweep, tick]
 
         statusBar.install(manager: self)
         checkSpaces()
@@ -315,6 +324,56 @@ final class WindowManager {
             }
         }
         hiddenByUs.removeAll()
+    }
+
+    /// Drops bookkeeping for windows that are no longer managed. `forget` clears all of it when a window goes;
+    /// this catches anything a path missed, so a long-running daemon can't slowly collect stale entries
+    /// (or act on a stale one if macOS reuses the window ID).
+    private func pruneStale() {
+        let live = Set(model.windows.keys)
+        let before = elements.count + lastApplied.count + seenFrame.count + settling.count + rulesRun.count
+        func keep<V>(_ d: inout [WindowID: V]) { d = d.filter { live.contains($0.key) } }
+        keep(&elements); keep(&pids); keep(&lastApplied); keep(&appliedSize); keep(&reappliedAt); keep(&fights)
+        keep(&rulesRun); keep(&missing); keep(&dragged); keep(&seenFrame); keep(&appFullscreen); keep(&settling)
+        settling = settling.filter { $0.value > Date() }
+        hiddenByUs.formIntersection(live)
+        unsure.formIntersection(live)
+        animating.formIntersection(live)
+        liveFrames.keep(live)
+        let server = Set(windowServerSnapshot().keys)
+        if !server.isEmpty {
+            fullscreenSkipped.formIntersection(server)
+            nativeFullscreen.formIntersection(server)
+            parked = parked.filter { server.contains($0.key) && $0.value.until > Date() }
+        }
+        if debug {
+            let after = elements.count + lastApplied.count + seenFrame.count + settling.count + rulesRun.count
+            if after != before { log("pruned \(before - after) stale per-window entries") }
+        }
+    }
+
+    /// On-screen normal windows → their app, as of the last look.
+    private var serverWindows: [CGWindowID: pid_t] = [:]
+
+    /// Diffs the window server's on-screen list (one local call, no app is asked) and scans just the apps
+    /// whose windows came or went. Catches windows that never announce themselves, and tab switches.
+    private func watchWindowServer() {
+        guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
+            as? [[String: Any]] else { return }
+        let me = getpid()
+        var now: [CGWindowID: pid_t] = [:]
+        now.reserveCapacity(serverWindows.count)
+        for d in list where d[kCGWindowLayer as String] as? Int == 0 {
+            guard let n = d[kCGWindowNumber as String] as? Int, let p = d[kCGWindowOwnerPID as String] as? Int,
+                  pid_t(p) != me else { continue }
+            now[CGWindowID(n)] = pid_t(p)
+        }
+        guard now != serverWindows else { return }
+        var changed = Set<pid_t>()
+        for (id, p) in now where serverWindows[id] == nil { changed.insert(p) }
+        for (id, p) in serverWindows where now[id] == nil { changed.insert(p) }
+        serverWindows = now
+        if !changed.isEmpty { requestSync(.apps(changed)) }
     }
 
     private func saveSession() {
