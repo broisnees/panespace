@@ -123,7 +123,8 @@ public struct WindowInfo: Equatable {
 }
 
 public final class WindowNode: Node {
-    public let id: WindowID
+    /// Changes only when a native tab takes over its sibling's place (`Model.replaceWindow`).
+    public internal(set) var id: WindowID
     public var info: WindowInfo
     public internal(set) var isFloating = false
     /// Desired frame while floating (global coords). Synced from the real window by the app layer.
@@ -150,7 +151,13 @@ public final class Workspace {
     public internal(set) var floating: [WindowNode] = []
     /// Most-recently-focused first. Includes floating windows.
     public internal(set) var mru: [WindowNode] = []
-    public internal(set) var fullscreen: WindowNode?
+    public internal(set) var fullscreen: WindowNode? {
+        // A floating window leaving full screen goes back to its own frame, which has to be written again.
+        didSet { if let old = oldValue, old !== fullscreen, old.isFloating { old.floatingFrameDirty = true } }
+    }
+    /// The display (by name) this workspace belongs on. It survives the display being unplugged, so the
+    /// workspace goes back there when it's plugged in again.
+    var homeMonitor: String?
     /// Container selected via `focus parent`; nil when a window is focused.
     public internal(set) var selected: Container?
     public internal(set) var monitorID: MonitorID

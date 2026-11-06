@@ -46,6 +46,47 @@ final class TreeTests: XCTestCase {
         XCTAssertEqual(tree, "H[1 2 4 3]")
     }
 
+    func testNativeTabSwitchKeepsTile() {
+        add(1, 2, 3)
+        run("focus left")
+        m.replaceWindow(2, with: 9, info: WindowInfo(app: "App", title: "tab 2"))
+        XCTAssertEqual(tree, "H[1 9 3]")
+        XCTAssertEqual(focused, 9)
+        XCTAssertNil(m.windows[2])
+        XCTAssertEqual(frame(9), CGRect(x: 333, y: 0, width: 333, height: 500))
+        m.replaceWindow(9, with: 1, info: WindowInfo(app: "App"))  // already managed: no-op
+        XCTAssertEqual(tree, "H[1 9 3]")
+    }
+
+    func testWindowComesBackToItsTile() {
+        add(1, 2, 3)
+        let spot = m.tileSpot(1)!  // leftmost: goes back before 2
+        XCTAssertEqual(spot.neighbor, 2)
+        XCTAssertTrue(spot.before)
+        m.removeWindow(1)
+        run("focus right")  // focus elsewhere, so the default would append after 3
+        m.addWindow(1, info: WindowInfo(app: "App"), floating: false, frame: nil, near: spot.neighbor, before: spot.before)
+        XCTAssertEqual(tree, "H[1 2 3]")
+    }
+
+    func testTabMatesComeForwardTogether() {
+        add(1, 2)
+        run("split v")
+        add(3)  // H[1 V[2 3]]
+        run("focus left")  // window 1, a direct child of the root
+        run("layout tabbed")
+        XCTAssertEqual(tree, "T[1 V[2 3]]")
+        XCTAssertEqual(Set(m.tabMates(3)), [2])
+        XCTAssertEqual(m.tabMates(1), [])
+    }
+
+    func testFocusOnActivationParses() {
+        XCTAssertEqual(Config.parse("focus_on_window_activation none\n").focusOnActivation, "none")
+        XCTAssertEqual(Config.parse("focus_on_window_activation smart\n").focusOnActivation, "urgent")
+        XCTAssertEqual(Config.parse("").focusOnActivation, "focus")
+        XCTAssertFalse(Config.parse("focus_on_window_activation bogus\n").warnings.isEmpty)
+    }
+
     func testSplitThenOpen() {
         add(1, 2)
         run("split v")
@@ -400,6 +441,40 @@ final class MultiMonitorTests: XCTestCase {
         XCTAssertEqual(m.focusedWorkspace.name, "2")
         m.run("focus left")
         XCTAssertEqual(m.focusedWindow?.id, 1)
+    }
+
+    func testDisplayFallsBackToItsLastWorkspace() {
+        add(1, at: 10)       // ws 1 on main
+        m.osFocused(1)
+        m.run("workspace number 5")
+        m.addWindow(5, info: WindowInfo(app: "B"), floating: false, frame: nil)
+        m.run("workspace number 3")
+        m.addWindow(3, info: WindowInfo(app: "C"), floating: false, frame: nil)
+        m.run("workspace number 5")       // last shown before 3... now 5 is shown, 3 most recent hidden
+        m.run("move workspace to output right")
+        XCTAssertEqual(m.visible[1]?.name, "3")  // the one shown last, not the first created (1)
+    }
+
+    func testWorkspacesGoHomeWhenDisplayReturns() {
+        add(1, at: 10)
+        add(2, at: 1500)  // on ws 2, the external display
+        m.osFocused(1)
+        m.setMonitors([mon1])  // unplugged: ws 2 moves to the laptop
+        XCTAssertEqual(m.workspace(named: "2")?.monitorID, 1)
+        m.setMonitors([mon1, mon2])  // plugged back in
+        XCTAssertEqual(m.workspace(named: "2")?.monitorID, 2)
+        XCTAssertEqual(m.visible[2]?.name, "2")
+        XCTAssertEqual(m.visible[1]?.name, "1")
+        XCTAssertEqual(m.focusedWorkspace.name, "1")
+    }
+
+    func testFloatingWindowLeavingFullscreenGetsItsFrameBack() {
+        m.addWindow(5, info: WindowInfo(app: "A"), floating: true, frame: CGRect(x: 100, y: 100, width: 300, height: 200))
+        m.osFocused(5)
+        m.clearDirty(5)
+        m.run("fullscreen toggle")
+        m.run("fullscreen toggle")
+        XCTAssertEqual(m.windows[5]?.floatingFrameDirty, true)
     }
 
     func testMoveAcrossMonitorEdge() {

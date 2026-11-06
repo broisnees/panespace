@@ -108,9 +108,18 @@ final class WindowManager {
     /// Last size we wrote; when unchanged a move needs one AX call instead of three.
     private var appliedSize: [WindowID: CGSize] = [:]
     private var reappliedAt: [WindowID: Date] = [:]
+    /// Times in a row an app moved its window back after we put it in its tile.
+    private var fights: [WindowID: Int] = [:]
+    /// The `for_window` rules (by index) already applied to each window.
+    private var rulesRun: [WindowID: Set<Int>] = [:]
     /// Windows that left the layout for a while (minimized, app hidden, briefly unlisted): where they lived,
     /// so they come back to the same workspace instead of the focused one.
-    private var parked: [WindowID: (workspace: String, floating: Bool)] = [:]
+    private var parked: [WindowID: (workspace: String, floating: Bool, frame: CGRect?, spot: (neighbor: WindowID, before: Bool)?, until: Date)] = [:]
+    /// New windows already seen listed-but-not-shown once (re-checked once, not on every sweep).
+    private var offscreenSeen = Set<WindowID>()
+    /// When a window last left the screen (closed, minimized, app hidden or quit). macOS then hands focus to
+    /// some other window, often one on another workspace: that is not the user asking to go there.
+    private var windowLostAt = Date.distantPast
     /// Consecutive syncs a still-existing window was missing from its app's list.
     private var missing: [WindowID: Int] = [:]
     private var dragged: [WindowID: Bool] = [:]  // true = was resized
@@ -139,12 +148,26 @@ final class WindowManager {
     private var holdApplyUntil = Date.distantPast
     /// The title-bar double-click that already became a zoom.
     private var zoomedClick = 0
+    /// Windows their app made cover a whole display (a game's or player's borderless full screen), and that
+    /// frame. Panespace leaves them be until the app shrinks them again.
+    private var appFullscreen: [WindowID: CGRect] = [:]
+    /// The last click on a window's green (full-screen) button: that one full screen becomes Panespace's zoom.
+    private var greenButton: (id: WindowID, at: Date)?
+    /// Windows in macOS full screen right now (on their own Space): kept out of the layout until they leave.
+    private var nativeFullscreen = Set<WindowID>()
+    /// New windows left alone because they were born full screen (logged once each).
+    private var fullscreenSkipped = Set<WindowID>()
+    /// Until then, macOS is sliding between Spaces: window moves are its animation, not the app's.
+    private var spaceSettleUntil = Date.distantPast
+    /// The layout being applied comes from the user's own command (not an app or macOS event).
+    private var userAsked = false
     private var modDrag: ModDrag?
     /// Bumped on every mod-drag begin and end, so a hit test that lands after its drag ended is dropped.
     private var modDragGeneration = 0
     private var lastFocused: WindowID?
     private var pendingFocus: (id: WindowID, until: Date)?
     private var lastFocusedMonitor: MonitorID?
+    private let focusHolder = FocusHolder()
     private var applyQueued = false
     private var syncScope: SyncScope?
     private var syncInFlight = false
@@ -197,6 +220,7 @@ final class WindowManager {
         AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), 1.0)
         tap.onCommand = { [unowned self] in runCommand($0) }
         tap.onMouseUp = { [unowned self] in mouseUp() }
+        tap.onMouseDown = { [unowned self] in clicked(at: $0) }
         tap.onMouseMoved = { [unowned self] in mouseMoved($0) }
         tap.onModDrag = { [unowned self] phase, p in
             switch phase {
@@ -223,6 +247,7 @@ final class WindowManager {
         }
         nc.addObserver(forName: NSWorkspace.didTerminateApplicationNotification, object: nil, queue: .main) { [unowned self] n in
             guard let p = pid(n) else { return }
+            windowLostAt = Date()
             trackers[p] = nil
             requestSync(.apps([p]))
         }
@@ -236,6 +261,7 @@ final class WindowManager {
             }
         }
         nc.addObserver(forName: NSWorkspace.activeSpaceDidChangeNotification, object: nil, queue: .main) { [unowned self] _ in
+            spaceSettleUntil = Date().addingTimeInterval(1.5)
             requestSync(.all)
             checkSpaces()
         }
@@ -345,6 +371,8 @@ final class WindowManager {
     /// Never touches another app synchronously: model update, then the AX work is queued.
     @discardableResult
     func runCommand(_ text: String) -> CommandResult {
+        userAsked = true  // a key, the menu or the CLI: allowed to take the user out of a full-screen Space
+        defer { userAsked = false }
         let modeBefore = model.mode
         let r = timed("model.run '\(text)'") { model.run(text) }
         perform(r.effects)
@@ -373,6 +401,7 @@ final class WindowManager {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/bin/sh")
         p.arguments = ["-c", cmd]
+        p.currentDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
         var env = ProcessInfo.processInfo.environment
         env["PATH"] = (env["PATH"].map { $0 + ":" } ?? "") + "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
         p.environment = env
@@ -410,7 +439,8 @@ final class WindowManager {
             eventQueue.async { [weak self] in
                 guard let id = el.windowID else { return }
                 let frame = el.frame
-                DispatchQueue.main.async { self?.windowMoved(id, frame: frame, resized: resized) }
+                let fullScreen = el.isFullScreen
+                DispatchQueue.main.async { self?.windowMoved(id, pid: pid, frame: frame, resized: resized, fullScreen: fullScreen) }
             }
         case kAXTitleChangedNotification:
             eventQueue.async { [weak self] in
@@ -420,6 +450,7 @@ final class WindowManager {
                     guard let self, var info = self.model.windows[id]?.info, info.title != title else { return }
                     info.title = title
                     self.model.updateInfo(id, info)
+                    self.runRules(id)
                 }
             }
         case kAXFocusedWindowChangedNotification:
@@ -428,24 +459,30 @@ final class WindowManager {
         case kAXUIElementDestroyedNotification:
             // Closed: give its space back right away instead of waiting for a rescan.
             if let id = elements.first(where: { CFEqual($0.value, el) })?.key {
+                windowLostAt = Date()
                 forget(id)
                 scheduleApply()
             }
             requestSync(.apps([pid]))
         default:  // window created/minimized, app hidden/shown
+            if n == kAXWindowMiniaturizedNotification || n == kAXApplicationHiddenNotification { windowLostAt = Date() }
             requestSync(.apps([pid]))
         }
     }
 
-    private func windowMoved(_ id: WindowID, frame: CGRect?, resized: Bool) {
+    private func windowMoved(_ id: WindowID, pid: pid_t, frame: CGRect?, resized: Bool, fullScreen: Bool) {
         guard let w = model.windows[id], modDrag == nil else { return }
+        // Going into macOS full screen (a video, a music player, a game): never fight the transition. A scan of
+        // its app sets the window aside like a minimized one; it comes back to its tile when it leaves.
+        if fullScreen { return requestSync(.apps([pid])) }
         // Our own animation frames, and their stragglers.
         if animating.contains(id) || (settling[id].map { Date() < $0 } ?? false) { return }
         let click = tap.click
         let clicking = tap.isMouseDown || mouseUpPending
         // A title-bar double-click: macOS zoomed (or unzoomed) the window. Make it Panespace's zoom instead.
         if resized, !w.isFloating, click.count >= 2, !click.dragged, click.seq != zoomedClick,
-           clicking || Date().timeIntervalSince(click.upAt) < 0.6 {
+           clicking || Date().timeIntervalSince(click.upAt) < 0.6,
+           let r = lastApplied[id], r.contains(click.down), click.down.y - r.minY < 52 {
             return titleBarZoom(id, click: click.seq)
         }
         // Only a real drag is the user moving or resizing; a still click that moved the window was the app.
@@ -462,17 +499,78 @@ final class WindowManager {
             return
         }
         if let frame { seenFrame[id] = frame }
+        // Floating: wherever it goes (its app, Rectangle, a keyboard shortcut) is its new home.
+        if w.isFloating {
+            if let f = frame, !hiddenByUs.contains(id), onScreen(f) { model.syncFloatingFrame(id, f) }
+            return
+        }
+        // The app made its window cover a whole display (a game's or video player's borderless full screen):
+        // its call. Leave it until the app shrinks it again, then put it back in its tile.
+        if let f = frame, !w.isFloating, coversDisplay(f), !(lastApplied[id].map { $0.insetBy(dx: -2, dy: -2).contains(f) } ?? false) {
+            appFullscreen[id] = f
+            return
+        }
+        if appFullscreen.removeValue(forKey: id) != nil {
+            lastApplied[id] = nil
+            appliedSize[id] = nil
+            unsure.insert(id)
+            return scheduleApply()
+        }
+        // macOS sliding between Spaces, or the user away in a full-screen Space: not the app moving its window.
+        if Date() < spaceSettleUntil || spaces.activeIsFullscreen { return }
         // The app moved its own window (e.g. restored a saved frame). Put it back, at most once a second
         // so apps that snap sizes (terminals) can't make us loop.
         guard let target = lastApplied[id], let f = frame,
               Date().timeIntervalSince(reappliedAt[id] ?? .distantPast) > 1 else { return }
         if abs(f.minX - target.minX) > 2 || abs(f.minY - target.minY) > 2
             || abs(f.width - target.width) > 30 || abs(f.height - target.height) > 30 {
+            // Third time in a row within a few seconds: the app insists (an emulator keeping its aspect ratio).
+            // Let it have its frame until the layout itself changes, instead of flickering forever.
+            let last = reappliedAt[id] ?? .distantPast
+            fights[id] = Date().timeIntervalSince(last) < 4 ? (fights[id] ?? 0) + 1 : 1
+            if fights[id]! >= 3 {
+                if debug { log("window \(id) keeps resizing itself; leaving it at \(f)") }
+                lastApplied[id] = f
+                appliedSize[id] = f.size
+                return
+            }
             reappliedAt[id] = Date()
             lastApplied[id] = nil
             appliedSize[id] = nil
             unsure.insert(id)
             scheduleApply()
+        }
+    }
+
+    /// Mostly on a display: a frame worth remembering for a floating window (not one parked in a corner).
+    private func onScreen(_ f: CGRect) -> Bool {
+        let area = f.width * f.height
+        guard area > 0 else { return false }
+        return model.monitors.contains { m in
+            let i = m.visibleFrame.intersection(f)
+            return !i.isNull && i.width * i.height >= area * 0.3
+        }
+    }
+
+    private func coversDisplay(_ f: CGRect) -> Bool {
+        model.monitors.contains { f.insetBy(dx: -2, dy: -2).contains($0.frame) }
+    }
+
+    /// A click in a window's top-left corner might be on its green button: check, off the main thread (the hit
+    /// test asks the app). That window's next macOS full screen becomes Panespace's zoom instead.
+    private func clicked(at p: CGPoint) {
+        // The user picks the window now: a focus Panespace asked for a moment ago (still queued, or awaiting its
+        // report) must neither land after this click nor make its report look stale.
+        pendingFocus = nil
+        _ = focusGeneration.increment()
+        guard model.config.interceptNativeFullscreen, let w = model.window(at: p),
+              let r = w.isFloating ? w.floatingFrame : lastApplied[w.id], p.x - r.minX < 100, p.y - r.minY < 60 else { return }
+        let id = w.id
+        eventQueue.async { [weak self] in
+            var hit: AXUIElement?
+            guard AXUIElementCopyElementAtPosition(AXUIElementCreateSystemWide(), Float(p.x), Float(p.y), &hit) == .success,
+                  hit?.subrole == kAXFullScreenButtonSubrole as String else { return }
+            DispatchQueue.main.async { self?.greenButton = (id, Date()) }
         }
     }
 
@@ -490,25 +588,71 @@ final class WindowManager {
     }
 
     /// Reads which window the OS has focused, off the main thread, and follows it.
-    private func refreshOSFocus() {
+    private func refreshOSFocus(recheck: Bool = false, retry: Bool = true) {
         guard let front = NSWorkspace.shared.frontmostApplication else { return }
         let pid = front.processIdentifier
         guard pid != getpid() else { return }
         eventQueue.async { [weak self] in
-            guard let w = AXUIElement.app(pid).focusedWindow, let id = w.windowID else { return }
-            DispatchQueue.main.async { self?.osFocusReported(id) }
+            let id = AXUIElement.app(pid).focusedWindow?.windowID
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if let id { return self.osFocusReported(id, recheck: recheck) }
+                // Cmd-Tab can land before the app has a focused window to report: ask once more shortly.
+                if retry {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { self.refreshOSFocus(recheck: recheck, retry: false) }
+                    return
+                }
+                // Still none: the app is in front with no window of its own focused. If none of its windows
+                // is on screen, go to where they are, like Cmd-Tab to an app on another macOS Space.
+                guard NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
+                      Date().timeIntervalSince(self.windowLostAt) > 0.8 else { return }
+                let mine = self.model.windows.values.filter { $0.info.pid == pid }
+                guard !mine.contains(where: { $0.workspace.map(self.model.isVisible) ?? false }),
+                      let target = mine.min(by: { $0.id < $1.id }) else { return }
+                self.osFocusReported(target.id, recheck: true)
+            }
         }
     }
 
-    private func osFocusReported(_ id: WindowID) {
+    private func osFocusReported(_ id: WindowID, recheck: Bool = false) {
         if let p = pendingFocus {
             // We just asked for a different window; ignore stale reports until it lands.
             if p.id == id || Date() > p.until { pendingFocus = nil } else { return }
         }
-        guard model.windows[id] != nil else { return }
+        guard let w = model.windows[id] else { return }
+        // Focus jumped to a window on a workspace that isn't shown. Right after a window closed, minimized or
+        // its app hid, that's macOS picking a stand-in (often the same app's window elsewhere): stay put.
+        // (Scratchpad windows count as not shown: macOS picking one after a close must not pop it out.)
+        if id != model.focusedWindow?.id, !(w.workspace.map(model.isVisible) ?? false) {
+            if Date().timeIntervalSince(windowLostAt) < 0.8 { return keepFocus() }
+            // An app brought itself forward (notification click, Spotlight, a link) rather than the user
+            // Cmd-Tabbing to it: with focus_on_window_activation none/urgent, stay on this workspace.
+            if model.config.focusOnActivation != "focus", Date().timeIntervalSince(tap.lastAppSwitch) > 1.5 {
+                if debug { log("focus: \(w.info.app) activated on workspace \(w.workspace?.name ?? "scratchpad"); staying (focus_on_window_activation)") }
+                return keepFocus()
+            }
+            // Same app as the focused window: the close that caused it may not have been reported yet.
+            if !recheck, let cur = model.focusedWindow, pids[cur.id] == pids[id] {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { self.refreshOSFocus(recheck: true) }
+                return
+            }
+        }
         lastFocused = id
         if id != model.focusedWindow?.id {
             model.osFocused(id)
+            scheduleApply()
+        }
+    }
+
+    /// Takes keyboard focus back from a window macOS focused off-screen: to the workspace's own window, or to
+    /// Panespace when the workspace is empty, so typing never lands in a window the user can't see.
+    private func keepFocus() {
+        if debug { log("focus: ignoring macOS's stand-in focus on another workspace") }
+        if model.focusedWindow == nil {
+            lastFocused = nil
+            focusHolder.take(model.focusedMonitor.id)
+        } else {
+            lastFocused = nil  // apply() focuses the model's window again
             scheduleApply()
         }
     }
@@ -557,16 +701,31 @@ final class WindowManager {
         guard model.config.focusFollowsMouse, !tap.isMouseDown, Date().timeIntervalSince(lastMouseMove) > 0.05 else { return }
         lastMouseMove = Date()
         guard let w = model.window(at: p), w.id != model.focusedWindow?.id else { return }
+        // Only between tiles: focusing raises the window, so hovering in and out of a floating window would
+        // flip it above and below the tile under it. Floating windows take focus on click.
+        if w.isFloating || model.focusedWindow?.isFloating == true { return }
         model.osFocused(w.id)
         apply(warp: false)
     }
 
+    private var screensWork: DispatchWorkItem?
+
+    /// Displays report several changes while one is plugged in or wakes: act once they've settled.
     private func screensChanged() {
+        screensWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.screensSettled() }
+        screensWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: work)
+    }
+
+    private func screensSettled() {
         model.setMonitors(Screens.read())
         lastApplied.removeAll()
         appliedSize.removeAll()
         seenFrame.removeAll()
-        hiddenByUs.removeAll()  // re-hide on the new geometry
+        // Hidden ones are hidden again on the new geometry. Ones whose workspace is shown now (it took the place of
+        // one that went back to its display) stay marked, so they're brought out of the corner.
+        hiddenByUs = hiddenByUs.filter { id in model.windows[id]?.workspace.map(model.isVisible) == true }
         instantNext = true
         shownOn.removeAll()
         requestSync(.all)
@@ -668,7 +827,9 @@ final class WindowManager {
 
     private func modDragEnded(at p: CGPoint) {
         modDragGeneration += 1
-        guard let d = modDrag else { return }
+        // No window was grabbed (empty space, or let go before the hit test came back): still resume what the
+        // press held back.
+        guard let d = modDrag else { scheduleApply(); return startSync() }
         modDragMoved(to: p)
         modDrag = nil
         dragged.removeAll()  // our own frame writes during the drag aren't user drags
@@ -724,6 +885,10 @@ final class WindowManager {
         var goneApps = Set<pid_t>()
         var server: [WindowID: Bool]?  // window → on screen; nil when the window server didn't answer
         var newTrackers: [pid_t: AppTracker] = [:]
+        /// Background native tab → the selected tab of its group, shown in its place.
+        var tabs: [WindowID: WindowID] = [:]
+        /// New windows listed but not on screen yet → their app.
+        var offscreen: [WindowID: pid_t] = [:]
     }
 
     private struct Seen {
@@ -777,6 +942,8 @@ final class WindowManager {
         }
         let existing = trackers
         let known = model.windows.mapValues(\.isFloating)
+        // In a full-screen Space (or sliding to one) every desktop window is off screen: that says nothing.
+        let offscreenMeansHidden = !spaces.activeIsFullscreen && Date() >= spaceSettleUntil
         let refcon = refcon
         let started = DispatchTime.now().uptimeNanoseconds
         syncQueue.async { [weak self] in
@@ -802,12 +969,36 @@ final class WindowManager {
                 let bundle = app.bundleIdentifier ?? ""
                 var local: [WindowID: Seen] = [:]
                 var localMinimized: [WindowID] = []
+                var listed: [(el: AXUIElement, id: WindowID)] = []
                 for w in windows {
                     guard let id = w.windowID, server.isEmpty || server[id] != nil else { continue }
-                    if w.isMinimized {
+                    if w.isMinimized || w.isFullScreen {  // full screen: on its own Space, outside the layout
                         localMinimized.append(id)
                         continue
                     }
+                    listed.append((w, id))
+                }
+                // Native tabs (Finder, Terminal, Ghostty...): every tab is its own window, all sharing one
+                // frame, and only the selected one is on screen. The others aren't windows to tile.
+                var localTabs: [WindowID: WindowID] = [:]
+                var localOffscreen: [WindowID] = []
+                let offscreen = server.isEmpty ? [] : listed.filter { server[$0.id]?.onscreen == false }
+                if !offscreen.isEmpty {
+                    let shown = listed.filter { server[$0.id]?.onscreen == true }.compactMap { s in s.el.frame.map { (s.id, $0) } }
+                    for (w, id) in offscreen {
+                        if let f = w.frame, let sibling = shown.first(where: { sameFrame($0.1, f) }) {
+                            localTabs[id] = sibling.0
+                        } else if known[id] == nil {
+                            localOffscreen.append(id)  // not shown yet (still opening), or a stray hidden window
+                        } else if offscreenMeansHidden {
+                            // Its app took it off screen but keeps it listed (closed to the tray, say): it's
+                            // counted as missing, and after a few looks gives its tile back.
+                            localOffscreen.append(id)
+                        }
+                    }
+                }
+                for (w, id) in listed {
+                    if localTabs[id] != nil || localOffscreen.contains(id) { continue }
                     if let floating = known[id] {
                         local[id] = Seen(el: w, pid: pid, info: nil, kind: floating ? .float : .tile)
                         continue
@@ -821,6 +1012,8 @@ final class WindowManager {
                 lock.withLock {
                     result.seen.merge(local) { a, _ in a }
                     result.minimized.formUnion(localMinimized)
+                    result.tabs.merge(localTabs) { a, _ in a }
+                    for id in localOffscreen { result.offscreen[id] = pid }
                     if existing[pid] == nil { result.newTrackers[pid] = t }
                 }
             }
@@ -841,14 +1034,33 @@ final class WindowManager {
         let seen = r.seen
         for (pid, t) in r.newTrackers where trackers[pid] == nil { trackers[pid] = t }
         for id in seen.keys { missing[id] = nil }
-        for id in Array(model.windows.keys) where seen[id] == nil {
+        // The user picked another native tab: the newly selected one takes the old one's tile.
+        for (old, new) in r.tabs where model.windows[old] != nil {
+            if model.windows[new] == nil, let info = seen[new]?.info {
+                model.replaceWindow(old, with: new, info: info)
+                rulesRun[new] = rulesRun[old]  // the same window to the user: its rules already ran
+                unsure.insert(new)
+                if lastFocused == old { lastFocused = new }
+            }
+            forget(old)  // a tab dragged onto another window: that window already has its own tile
+        }
+        // Windows listed before they're shown: look once more shortly instead of waiting for the next sweep.
+        let fresh = r.offscreen.filter { offscreenSeen.insert($0.key).inserted }
+        if !fresh.isEmpty {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { self.requestSync(.apps(Set(fresh.values))) }
+        }
+        if let s = r.server { offscreenSeen = offscreenSeen.filter { s[$0] != nil } }
+        for id in Array(model.windows.keys) where seen[id] == nil && r.tabs[id] == nil {
             guard let pid = pids[id], scope.contains(pid) || r.goneApps.contains(pid) else { continue }
             if r.failedPids.contains(pid) { continue }  // app didn't answer this time; nothing changed
             // Gone from its app's list and either unknown to the window server or still on screen
             // (playing its close animation): closed. Off screen means another Space: wait (below).
             let gone = r.goneApps.contains(pid) || r.server.map { $0[id] ?? true } ?? false
             if gone {
-                park(id)  // in case it was a glitch and comes back: same workspace
+                // The window server still has it (closing, or the app answered with an empty list after a
+                // lock or wake): remember its workspace for when it's listed again; dropped once the server
+                // forgets the ID. Unknown to the server: really closed, nothing to remember (IDs get reused).
+                if r.server?[id] != nil { park(id) }
                 forget(id)
             } else if r.minimized.contains(id) || r.hiddenPids.contains(pid) {
                 park(id)
@@ -870,21 +1082,33 @@ final class WindowManager {
             for (i, e) in s.windows.enumerated() { saved[e.id] = (i, e) }
         }
         var added: [WindowID] = []
+        let focusBefore = model.focusedWindow?.id
         let order = seen.keys.sorted { (saved[$0]?.0 ?? Int.max, $0) < (saved[$1]?.0 ?? Int.max, $1) }
         for id in order {
             let s = seen[id]!
             elements[id] = s.el
             pids[id] = s.pid
-            guard model.windows[id] == nil, let info = s.info else { continue }
-            if let p = parked.removeValue(forKey: id) {
-                model.addWindow(id, info: info, floating: p.floating, frame: nil, workspaceName: p.workspace)
+            guard model.windows[id] == nil, let info = s.info, !nativeFullscreen.contains(id) else { continue }
+            // Born covering a whole display, menu bar and all, with no title: an app's own full-screen window
+            // (WebKit puts a fullscreen video in one, then takes it into macOS full screen). Tiling it would break
+            // that, so leave it alone; if it ever shrinks to a normal window, a later scan picks it up.
+            if let f = s.frame, coversDisplay(f) {
+                if fullscreenSkipped.insert(id).inserted { log("full screen: leaving \(info.app)'s full-screen window alone") }
+                continue
+            }
+            if let p = parked.removeValue(forKey: id), Date() < p.until {
+                model.addWindow(id, info: info, floating: p.floating, frame: nil, workspaceName: p.workspace,
+                                near: p.spot?.neighbor, before: p.spot?.before ?? false)
+                if let f = p.frame { model.restoreFloatingFrame(id, f) }
+                markRulesRun(id)  // back from minimized or hidden: its rules ran when it first appeared
                 continue
             }
             if let e = saved[id]?.1, e.bundle == info.bundleID {
                 model.addWindow(id, info: info, floating: e.floating, frame: nil,
                                 workspaceName: e.workspace ?? model.focusedWorkspace.name)
                 if e.workspace == nil { model.run("move scratchpad", on: id) }
-                continue  // rules already ran in the previous session
+                markRulesRun(id)  // rules already ran in the previous session
+                continue
             }
             model.addWindow(id, info: info, floating: s.kind == .float, frame: s.frame, useMonitorOfFrame: startup)
             added.append(id)
@@ -896,11 +1120,12 @@ final class WindowManager {
             if let s = restoring { model.restoreFocus(workspace: s.focused) }
             restoring = nil
         }
-        for id in added {
-            for rule in model.config.rules {
-                guard let w = model.windows[id], rule.criteria.matches(w) else { continue }
-                perform(model.run(rule.command, on: id).effects)
-            }
+        for id in added { runRules(id) }
+        // A new floating window doesn't take the keyboard by itself: an autocomplete list or a tool panel
+        // would steal it from the editor. If macOS really focused it, refreshOSFocus (below) follows.
+        if !added.isEmpty, let before = focusBefore, model.windows[before] != nil,
+           let now = model.focusedWindow, added.contains(now.id), now.isFloating {
+            model.osFocused(before)
         }
         for id in fullscreenOnReturn where model.windows[id] != nil {
             fullscreenOnReturn.remove(id)
@@ -912,9 +1137,28 @@ final class WindowManager {
         startSync()
     }
 
-    private func park(_ id: WindowID) {
+    /// A window that comes back (restored session, unminimized, unhidden) already had its rules: a later title
+    /// change must not run them again (a `move to workspace` rule would yank it back from where the user put it).
+    private func markRulesRun(_ id: WindowID) {
+        guard let w = model.windows[id] else { return }
+        rulesRun[id, default: []].formUnion(model.config.rules.indices.filter { model.config.rules[$0].criteria.matches(w) })
+    }
+
+    /// Runs the `for_window` rules that match the window and haven't run for it yet.
+    private func runRules(_ id: WindowID) {
+        for (i, rule) in model.config.rules.enumerated() where !(rulesRun[id]?.contains(i) ?? false) {
+            guard let w = model.windows[id], rule.criteria.matches(w) else { continue }
+            rulesRun[id, default: []].insert(i)
+            perform(model.run(rule.command, on: id).effects)
+        }
+        scheduleApply()
+    }
+
+    private func park(_ id: WindowID, for seconds: TimeInterval = .infinity) {
         guard let w = model.windows[id], let ws = w.workspace else { return }
-        parked[id] = (ws.name, w.isFloating)
+        parked[id] = (ws.name, w.isFloating, w.isFloating ? w.floatingFrame : nil, model.tileSpot(id),
+                      Date().addingTimeInterval(seconds))
+        windowLostAt = Date()
     }
 
     private func forget(_ id: WindowID) {
@@ -926,10 +1170,13 @@ final class WindowManager {
         lastApplied[id] = nil
         appliedSize[id] = nil
         reappliedAt[id] = nil
+        fights[id] = nil
+        rulesRun[id] = nil
         missing[id] = nil
         dragged[id] = nil
         seenFrame[id] = nil
         animating.remove(id)
+        appFullscreen[id] = nil
         settling[id] = nil
         unsure.remove(id)
         liveFrames[id] = nil
@@ -979,6 +1226,14 @@ final class WindowManager {
             switch p {
             case .tiled(let r):
                 if id == leave { continue }
+                if let f = appFullscreen[id] {
+                    // Its app's own full screen: leave it, but bring it back if its workspace was hidden meanwhile.
+                    if wasHidden {
+                        show[pid, default: []].append(Job(id: id, el: el, action: .frame(f, positionOnly: false, from: nil)))
+                        hiddenByUs.remove(id)
+                    }
+                    continue
+                }
                 let unchanged = lastApplied[id] == r && !wasHidden
                 if unchanged && !animating.contains(id) { continue }
                 if animated {
@@ -1031,17 +1286,24 @@ final class WindowManager {
         if restart { moves += carried }
 
         var focusJob: (pid: pid_t, id: WindowID, el: AXUIElement, gen: Int)?
+        let mates = model.focusedWindow.map { model.tabMates($0.id).compactMap { elements[$0] } } ?? []
+        // In a full-screen Space (a video, a game), focusing a desktop window would make macOS leave it: leave focus
+        // to macOS there; it reports the right window when the user comes back. Only looked up when it matters.
         if let f = model.focusedWindow {
-            if f.id != lastFocused, let el = elements[f.id], let pid = pids[f.id] {
+            if f.id != lastFocused, let el = elements[f.id], let pid = pids[f.id],
+               userAsked || !Spaces.summary().activeIsFullscreen {
+                focusHolder.release()
                 lastFocused = f.id
                 pendingFocus = (f.id, Date().addingTimeInterval(0.6))
                 focusJob = (pid, f.id, el, focusGeneration.increment())
             }
-        } else if lastFocused != nil {
-            // Empty workspace: take keyboard focus away from windows that are now parked off-screen.
+        } else if lastFocused != nil || focusHolder.monitor != model.focusedMonitor.id,
+                  userAsked || !Spaces.summary().activeIsFullscreen {
+            // Empty workspace: take keyboard focus away from windows that are now parked off-screen, and bring the
+            // menu bar to this display (also when moving from one empty display to another).
             lastFocused = nil
             _ = focusGeneration.increment()
-            NSApp.activate(ignoringOtherApps: true)
+            focusHolder.take(model.focusedMonitor.id)
         }
 
         if restart || focusJob != nil {
@@ -1064,8 +1326,10 @@ final class WindowManager {
             axQueue.async { [weak self] in
                 let waited = CACurrentMediaTime() - queued
                 func focus() {
-                    guard let fj = focusJob else { return }
-                    Focus.focus(pid: fj.pid, windowID: fj.id, element: fj.el)
+                    // Superseded (another focus, or a click) before it ran: a late focus would steal the keyboard.
+                    guard let fj = focusJob, generation.value == fj.gen else { return }
+                    for el in mates { el.perform(kAXRaiseAction) }  // the rest of its tab, under it
+                    Focus.focus(pid: fj.pid, windowID: fj.id, element: fj.el) { generation.value == fj.gen }
                     // Tahoe sometimes leaves another app's window on top; raise once more unless focus moved on.
                     queue.asyncAfter(deadline: .now() + 0.12) {
                         if generation.value == fj.gen { fj.el.perform(kAXRaiseAction) }
@@ -1128,6 +1392,18 @@ final class WindowManager {
         animating.removeAll()
         let until = Date().addingTimeInterval(0.3)
         for id in ids { settling[id] = until }
+        refreshCursor()
+    }
+
+    /// A window that moves under a still cursor never hears that the cursor is now over it, so it keeps a stale
+    /// cursor: a game that hid it for play doesn't show it again in its menu (it got focus while still sliding
+    /// in), a text view keeps an arrow, and so on. A zero-distance move of the real cursor makes the app under
+    /// it update. Tagged, so focus-follows-mouse ignores it.
+    private func refreshCursor() {
+        guard let p = CGEvent(source: nil)?.location,
+              let e = CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: p, mouseButton: .left) else { return }
+        e.setIntegerValueField(.eventSourceUserData, value: EventTap.cursorRefreshTag)
+        e.post(tap: .cghidEventTap)
     }
 
     private struct Written {
@@ -1138,7 +1414,7 @@ final class WindowManager {
     }
 
     private func afterWrite(_ w: Written) {
-        for (id, f) in w.floating { model.syncFloatingFrame(id, f) }
+        for (id, f) in w.floating where onScreen(f) { model.syncFloatingFrame(id, f) }
         guard !w.oversized.isEmpty else { return }
         // Look again shortly: an app that is merely slow to resize must not be mistaken for one with a minimum.
         let checks = w.oversized.compactMap { o in elements[o.id].map { (o, $0) } }
@@ -1170,7 +1446,11 @@ final class WindowManager {
             let enhanced = app.bool("AXEnhancedUserInterface") == true
             if enhanced { app.set("AXEnhancedUserInterface", false) }
             var local = Written()
+            AXUIElementSetMessagingTimeout(app, 0.25)
             for job in jobs {
+                // A hung app costs a quarter second, not the 1 s default per call (×4 per window).
+                AXUIElementSetMessagingTimeout(job.el, 0.25)
+                defer { AXUIElementSetMessagingTimeout(job.el, 0) }
                 switch job.action {
                 case .frame(let r, let positionOnly, let from):
                     if positionOnly {
@@ -1202,7 +1482,10 @@ final class WindowManager {
                     }
                 case .hide(let mid, let knownWidth, let readFrame):
                     if readFrame, let f = job.el.frame { local.floating.append((job.id, f)) }
-                    job.el.setPosition(hidePoint(mid, monitors: monitors) { knownWidth ?? job.el.size?.width ?? 0 })
+                    job.el.setPosition(hidePoint(mid, monitors: monitors) {
+                        let live = job.el.size
+                        return CGSize(width: knownWidth ?? live?.width ?? 0, height: live?.height ?? 0)
+                    })
                 }
             }
             if enhanced { app.set("AXEnhancedUserInterface", true) }
@@ -1264,25 +1547,42 @@ final class WindowManager {
             parts.append("You have \(spaces.extraDesktops + 1) macOS desktops. Windows on the other desktops can't be tiled. "
                          + "Close the extra ones in Mission Control: panespace workspaces (Caps+1…9) replace them.")
         }
-        if spaces.fullscreenApps > 0 {
-            parts.append("\(spaces.fullscreenApps) app(s) are in macOS full screen, outside tiling. Exit it (⌃⌘F) — "
-                         + "panespace fullscreen (Caps+F) keeps them tiled.")
-        }
         return parts.isEmpty ? nil : parts.joined(separator: "\n\n")
     }
 
     private func checkSpaces() {
         let s = Spaces.summary()
+        if spaces.activeIsFullscreen, !s.activeIsFullscreen {
+            // Back on the desktop from a full-screen Space: re-scan, and fix anything that drifted meanwhile.
+            lastApplied.removeAll()
+            appliedSize.removeAll()
+            requestSync(.all)
+            scheduleApply()
+        }
         defer {
             if s != spaces {
                 spaces = s
                 updateStatus()
             }
         }
-        // An app went into macOS full screen (green button, menu, or before panespace started): bring it back to
-        // the desktop and use panespace fullscreen instead, so it stays tiled and navigable.
-        if model.config.interceptNativeFullscreen {
-            for fs in s.fullscreenWindows where !pullingBack.contains(fs.window) { pullBack(fs) }
+        // A window went into macOS full screen. Apps do that for videos and games, and that's theirs to keep:
+        // set the window aside like a minimized one (the rest re-tile), and it comes back when it leaves.
+        // Only a click on the green button just before becomes Panespace's zoom instead, so it stays tiled.
+        let now = Set(s.fullscreenWindows.map(\.window))
+        if now != nativeFullscreen {
+            let left = !nativeFullscreen.subtracting(now).isEmpty
+            nativeFullscreen = now
+            if left { requestSync(.all) }  // back on the desktop: into the layout right away
+        }
+        for fs in s.fullscreenWindows where !pullingBack.contains(fs.window) {
+            if model.config.interceptNativeFullscreen, let g = greenButton, g.id == fs.window, Date().timeIntervalSince(g.at) < 3 {
+                greenButton = nil
+                pullBack(fs)
+            } else if model.windows[fs.window] != nil {
+                park(fs.window)
+                forget(fs.window)
+                scheduleApply()
+            }
         }
         if s.extraDesktops > 0, !warnedAboutDesktops {
             warnedAboutDesktops = true
@@ -1342,15 +1642,38 @@ final class WindowManager {
     }
 }
 
+/// Two frames of the same native tab group (equal up to rounding).
+func sameFrame(_ a: CGRect, _ b: CGRect) -> Bool {
+    abs(a.minX - b.minX) <= 1 && abs(a.minY - b.minY) <= 1 && abs(a.width - b.width) <= 1 && abs(a.height - b.height) <= 1
+}
+
 /// Where to park a window so ~1px stays on its monitor (macOS refuses fully off-screen frames).
-/// Bottom-right unless that corner touches another display; `width` is only read for bottom-left.
-func hidePoint(_ id: MonitorID, monitors: [Monitor], width: () -> CGFloat) -> CGPoint {
+/// The sliver goes on the screen's own edge, not the visible frame's, so a visible Dock covers it. Of the bottom
+/// corners and, failing those, the side edges, picks the spot where the window spills least onto other displays
+/// (3+ displays, or one below), then the one leaving the least of it on screen. `size` is read only when the
+/// bottom-right corner has another display beside or below it.
+func hidePoint(_ id: MonitorID, monitors: [Monitor], size: () -> CGSize) -> CGPoint {
     guard let m = monitors.first(where: { $0.id == id }) ?? monitors.first else { return .zero }
-    let v = m.visibleFrame
-    func hit(_ x: CGFloat, _ y: CGFloat) -> Int { monitors.contains { $0.id != m.id && $0.frame.contains(CGPoint(x: x, y: y)) } ? 1 : 0 }
-    let right = hit(v.maxX + 2, v.maxY - 2) + hit(v.maxX - 2, v.maxY + 2) + 10 * hit(v.maxX + 2, v.maxY + 2)
-    let left = hit(v.minX - 2, v.maxY - 2) + hit(v.minX + 2, v.maxY + 2) + 10 * hit(v.minX - 2, v.maxY + 2)
-    return right <= left ? CGPoint(x: v.maxX - 1, y: v.maxY - 1) : CGPoint(x: v.minX + 1 - width(), y: v.maxY - 1)
+    let f = m.frame, top = m.visibleFrame.minY  // never above the menu bar: macOS pushes title bars below it
+    let others = monitors.filter { $0.id != m.id }.map(\.frame)
+    let bottomRight = CGPoint(x: f.maxX - 1, y: f.maxY - 1)
+    // Nothing to the right of or below this screen: the corner is free whatever the window's size.
+    let quadrant = CGRect(x: bottomRight.x, y: bottomRight.y, width: .greatestFiniteMagnitude / 4, height: .greatestFiniteMagnitude / 4)
+    let rightBand = CGRect(x: f.maxX, y: f.minY - 1, width: .greatestFiniteMagnitude / 4, height: f.height + 2)
+    if !others.contains(where: { $0.intersects(quadrant) || $0.intersects(rightBand) }) { return bottomRight }
+    let s = size()
+    func area(_ r: CGRect) -> CGFloat { r.isNull ? 0 : r.width * r.height }
+    let spots = [
+        bottomRight,
+        CGPoint(x: f.minX + 1 - s.width, y: f.maxY - 1),
+        CGPoint(x: f.maxX - 1, y: top),
+        CGPoint(x: f.minX + 1 - s.width, y: top),
+    ]
+    func score(_ p: CGPoint) -> (CGFloat, CGFloat) {
+        let r = CGRect(origin: p, size: s)
+        return (others.reduce(0) { $0 + area($1.intersection(r)) }, area(f.intersection(r)))
+    }
+    return spots.min { score($0) < score($1) } ?? bottomRight
 }
 
 /// An NSAlert shown as a floating window instead of modally, so panespace keeps responding while it's up.
