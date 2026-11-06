@@ -281,7 +281,10 @@ public final class Model {
         let w = WindowNode(id: id, info: info)
         windows[id] = w
         var ws: Workspace = focusedWorkspace
-        if useMonitorOfFrame, let f = frame, let m = monitor(containing: CGPoint(x: f.midX, y: f.midY)),
+        // At startup every window joins the workspace shown on its display. A new floating window (a dialog, a
+        // panel, picture in picture) stays where its app put it, so it too joins the workspace shown there:
+        // filed under the focused one on another display, it would hover over the wrong workspace.
+        if useMonitorOfFrame || floating, let f = frame, let m = monitor(containing: CGPoint(x: f.midX, y: f.midY)),
            let v = visible[m.id] {
             ws = v
         }

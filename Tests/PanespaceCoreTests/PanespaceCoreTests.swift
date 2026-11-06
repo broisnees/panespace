@@ -532,6 +532,18 @@ final class MultiMonitorTests: XCTestCase {
         XCTAssertNotNil(m.visible[1])
     }
 
+    func testNewFloatingWindowJoinsTheWorkspaceOnItsDisplay() {
+        add(1, at: 10)
+        m.osFocused(1)
+        m.addWindow(5, info: WindowInfo(app: "A"), floating: true, frame: CGRect(x: 1400, y: 100, width: 200, height: 200))
+        XCTAssertEqual(m.windows[5]?.workspace?.name, "2")
+        XCTAssertEqual(m.focusedWorkspace.name, "1")  // opening doesn't take focus by itself
+        XCTAssertEqual(m.placements()[5], .floating(CGRect(x: 1400, y: 100, width: 200, height: 200), apply: false))
+        // Off every display: the focused workspace, as before.
+        m.addWindow(6, info: WindowInfo(app: "A"), floating: true, frame: CGRect(x: 5000, y: 5000, width: 200, height: 200))
+        XCTAssertEqual(m.windows[6]?.workspace?.name, "1")
+    }
+
     func testFloatingDropOnOtherMonitor() {
         m.addWindow(1, info: WindowInfo(app: "A"), floating: true, frame: CGRect(x: 100, y: 100, width: 200, height: 200),
                     useMonitorOfFrame: true)

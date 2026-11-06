@@ -65,6 +65,8 @@ enum Animator {
     struct Result {
         var floating: [(WindowID, CGRect)] = []
         var oversized: [(id: WindowID, actual: CGSize, wanted: CGSize)] = []
+        /// Sized while on another display (or off screen): looked at again shortly, see `WindowManager.recheck`.
+        var recheck: [(el: AXUIElement, frame: CGRect)] = []
         /// Frames written, and the slowest one (seconds), for the debug log.
         var frames = 0
         var slowest = 0.0
@@ -151,11 +153,22 @@ enum Animator {
                 t.to = m.to ?? start.offsetBy(dx: m.by.dx, dy: m.by.dy)
                 t.startSize = start.size
                 if m.readFrame { lock.withLock { result.floating.append((m.id, start)) } }
+                // To another display: no glide, straight there. macOS fits a window's size to the display it's
+                // on, so sizing it before it leaves would clamp it to the old one; and a window straddling two
+                // displays shows on only one of them, so the glide would just blink across anyway.
+                if crossesDisplays(start, t.to, monitors) {
+                    m.el.setFrame(t.to)
+                    lock.withLock { result.recheck.append((m.el, t.to)) }
+                    (t.from, t.last, t.next, t.done) = (t.to, t.to, t.to, true)
+                    store[m.id] = Kinetic(frame: t.to)
+                    continue
+                }
                 // Size changes once, here, and only the position glides: an app redraws its content on every
                 // resize, so resizing each frame is what makes heavy apps stutter. Moving is cheap.
                 let sized = CGRect(origin: start.origin, size: t.to.size)
                 if m.jump {
                     m.el.setFrame(sized)
+                    if m.park == nil { lock.withLock { result.recheck.append((m.el, t.to)) } }
                 } else if start.size != t.to.size {
                     m.el.setSize(t.to.size)
                 }
@@ -450,4 +463,11 @@ private func monitorID(of r: CGRect, _ monitors: [Monitor]) -> MonitorID? {
 func sameMonitor(_ a: CGRect, _ b: CGRect, _ monitors: [Monitor]) -> Bool {
     let m = monitorID(of: a, monitors)
     return m != nil && m == monitorID(of: b, monitors)
+}
+
+/// From one display to another: both centers on a display, different ones. Slides in from or out to off screen
+/// don't count.
+func crossesDisplays(_ a: CGRect, _ b: CGRect, _ monitors: [Monitor]) -> Bool {
+    guard let x = monitorID(of: a, monitors), let y = monitorID(of: b, monitors) else { return false }
+    return x != y
 }

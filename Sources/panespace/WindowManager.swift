@@ -179,6 +179,9 @@ final class WindowManager {
     /// Bumped on every mod-drag begin and end, so a hit test that lands after its drag ended is dropped.
     private var modDragGeneration = 0
     private var lastFocused: WindowID?
+    /// The display `lastFocused` was on when it got focus. Moved to another display, it's focused again there, so
+    /// the menu bar (and Spotlight, and new windows) follow it.
+    private var lastFocusedOn: MonitorID?
     private var pendingFocus: (id: WindowID, until: Date)?
     private var lastFocusedMonitor: MonitorID?
     private let focusHolder = FocusHolder()
@@ -791,6 +794,7 @@ final class WindowManager {
             }
         }
         lastFocused = id
+        lastFocusedOn = w.workspace?.monitorID
         if id != model.focusedWindow?.id {
             model.osFocused(id)
             scheduleApply()
@@ -1475,10 +1479,12 @@ final class WindowManager {
         // In a full-screen Space (a video, a game), focusing a desktop window would make macOS leave it: leave focus
         // to macOS there; it reports the right window when the user comes back. Only looked up when it matters.
         if let f = model.focusedWindow {
-            if f.id != lastFocused, let el = elements[f.id], let pid = pids[f.id],
+            let on = model.focusedMonitor.id
+            if f.id != lastFocused || on != lastFocusedOn, let el = elements[f.id], let pid = pids[f.id],
                userAsked || !Spaces.summary().activeIsFullscreen {
                 focusHolder.release()
                 lastFocused = f.id
+                lastFocusedOn = on
                 pendingFocus = (f.id, Date().addingTimeInterval(0.6))
                 focusJob = (pid, f.id, el, focusGeneration.increment())
             }
@@ -1534,6 +1540,14 @@ final class WindowManager {
                 let glide = Animator.run(moves, duration: duration, gen: gen, generation: anims, store: store, monitors: monitors)
                 written.floating += glide.floating
                 written.oversized += glide.oversized
+                written.recheck += glide.recheck
+                if !written.recheck.isEmpty {
+                    let again = written.recheck
+                    queue.asyncAfter(deadline: .now() + 0.15) {
+                        guard anims.value == gen else { return }  // a newer layout owns these windows now
+                        WindowManager.recheck(again)
+                    }
+                }
                 if let askedAt {  // a key or CLI command: how long until windows started moving
                     let first = !show.isEmpty ? shownAt : (glide.firstFrameAt ?? CACurrentMediaTime())
                     stats.latency((first - askedAt) * 1000)
@@ -1709,6 +1723,8 @@ final class WindowManager {
         var floating: [(WindowID, CGRect)] = []
         /// Windows that came out bigger than their tile: the app won't go smaller.
         var oversized: [(id: WindowID, actual: CGSize, wanted: CGSize)] = []
+        /// Given a whole new frame (new, shown again at another size, or crossing displays): see `recheck`.
+        var recheck: [(el: AXUIElement, frame: CGRect)] = []
     }
 
     private func afterWrite(_ w: Written) {
@@ -1767,6 +1783,7 @@ final class WindowManager {
                         }
                     } else {
                         job.el.setFrame(r)  // new or crossing monitors: size → position → size
+                        local.recheck.append((job.el, r))
                     }
                     // Asked to get smaller: an app with a minimum size stops short and overlaps its neighbour.
                     // One read to find out, so the layout can make room.
@@ -1787,14 +1804,29 @@ final class WindowManager {
                 }
             }
             if enhanced { app.set("AXEnhancedUserInterface", true) }
-            if !local.floating.isEmpty || !local.oversized.isEmpty {
+            if !local.floating.isEmpty || !local.oversized.isEmpty || !local.recheck.isEmpty {
                 lock.withLock {
                     out.floating += local.floating
                     out.oversized += local.oversized
+                    out.recheck += local.recheck
                 }
             }
         }
         return out
+    }
+
+    /// A window moved to another display takes a moment to learn which display it's on, and until then sizes
+    /// itself against the old one: the last resize of a size → position → size write can land clipped to the old
+    /// display's edge. Look once more and put it right. Runs on `axQueue`.
+    private static func recheck(_ list: [(el: AXUIElement, frame: CGRect)]) {
+        for (el, r) in list {
+            AXUIElementSetMessagingTimeout(el, 0.25)
+            defer { AXUIElementSetMessagingTimeout(el, 0) }
+            guard let f = el.frame else { continue }
+            if abs(f.minX - r.minX) > 2 || abs(f.minY - r.minY) > 2 || abs(f.width - r.width) > 2 || abs(f.height - r.height) > 2 {
+                el.setFrame(r)
+            }
+        }
     }
 
     /// Polls the window server (cheap, no app round trip) until every window is at its target origin.
