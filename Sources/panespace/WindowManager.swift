@@ -93,6 +93,9 @@ final class WindowManager {
     private let tap = EventTap()
     private let statusBar = StatusBar()
     private let border = FocusBorder()
+    let stats = Stats()
+    /// When the command being applied was asked for (key press or CLI), to time it to the first frame.
+    private var commandAt: Double?
     let chrome = MacChrome()
 
     private let axQueue = DispatchQueue(label: "panespace.ax", qos: .userInteractive)
@@ -218,7 +221,7 @@ final class WindowManager {
     func start() {
         _ = refcon
         AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), 1.0)
-        tap.onCommand = { [unowned self] in runCommand($0) }
+        tap.onCommand = { [unowned self] cmd, at in runCommand(cmd, keyAt: at) }
         tap.onMouseUp = { [unowned self] in mouseUp() }
         tap.onMouseDown = { [unowned self] in clicked(at: $0) }
         tap.onMouseMoved = { [unowned self] in mouseMoved($0) }
@@ -277,6 +280,7 @@ final class WindowManager {
         let sweep = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [unowned self] _ in
             requestSync(.all)
             pruneStale()
+            stats.sampleCPU()
         }
         sweep.tolerance = 5
         let tick = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [unowned self] _ in
@@ -429,7 +433,10 @@ final class WindowManager {
 
     /// Never touches another app synchronously: model update, then the AX work is queued.
     @discardableResult
-    func runCommand(_ text: String) -> CommandResult {
+    func runCommand(_ text: String, keyAt: Double? = nil) -> CommandResult {
+        stats.command()
+        commandAt = keyAt ?? CACurrentMediaTime()
+        defer { commandAt = nil }
         userAsked = true  // a key, the menu or the CLI: allowed to take the user out of a full-screen Space
         defer { userAsked = false }
         let modeBefore = model.mode
@@ -483,6 +490,9 @@ final class WindowManager {
             return IPC.json((model.config.modes[model.mode] ?? [:]).map { ["key": $0.key.description, "command": $0.value] })
         case "get_config": return IPC.json(["path": configURL.path, "warnings": configWarnings])
         case "get_version": return IPC.json(["version": panespaceVersion])
+        case "get_stats":
+            return IPC.json(stats.json(windows: model.windows.count, workspaces: model.workspaces.count,
+                                       displays: model.monitors.count))
         default: return IPC.json(["success": false, "error": "unknown message type '\(type)'"])
         }
     }
@@ -1081,12 +1091,13 @@ final class WindowManager {
                     if existing[pid] == nil { result.newTrackers[pid] = t }
                 }
             }
+            let ms = Double(DispatchTime.now().uptimeNanoseconds - started) / 1e6
             DispatchQueue.main.async {
                 guard let self else { return }
+                self.stats.sync(ms)
                 if self.debug {
                     log(String(format: "sync %@ %d windows in %.2f ms (off main), unanswered: %@", "\(scope)",
-                               result.seen.count, Double(DispatchTime.now().uptimeNanoseconds - started) / 1e6,
-                               "\(result.failedPids)"))
+                               result.seen.count, ms, "\(result.failedPids)"))
                 }
                 self.finishSync(scope, result)
             }
@@ -1401,6 +1412,7 @@ final class WindowManager {
             let moving = moves.map(\.id)
             let debug = self.debug
             let queued = CACurrentMediaTime()
+            let (askedAt, stats) = (commandAt, self.stats)
             axQueue.async { [weak self] in
                 let waited = CACurrentMediaTime() - queued
                 func focus() {
@@ -1417,6 +1429,7 @@ final class WindowManager {
                 // animation doesn't wait for the focus change to start.
                 if !moves.isEmpty { DispatchQueue.global(qos: .userInteractive).async(execute: focus) }
                 var written = WindowManager.write(show, monitors: monitors)
+                let shownAt = CACurrentMediaTime()
                 // Park the old workspace only once the new one is really on screen; otherwise apps that are slow
                 // to move (tens of ms) leave a frame of bare desktop in between: the "flicker".
                 WindowManager.waitUntilShown(arriving, timeout: 0.08)
@@ -1425,6 +1438,11 @@ final class WindowManager {
                 let glide = Animator.run(moves, duration: duration, gen: gen, generation: anims, store: store, monitors: monitors)
                 written.floating += glide.floating
                 written.oversized += glide.oversized
+                if let askedAt {  // a key or CLI command: how long until windows started moving
+                    let first = !show.isEmpty ? shownAt : (glide.firstFrameAt ?? CACurrentMediaTime())
+                    stats.latency((first - askedAt) * 1000)
+                }
+                if !moves.isEmpty { stats.animation(frames: glide.frames, seconds: glide.seconds, slowest: glide.slowest) }
                 if debug, !moves.isEmpty {
                     log(String(format: "animated %d windows: queue %.1f ms, setup %.1f ms, %d frames, slowest %.1f ms",
                                moves.count, waited * 1000, glide.setup * 1000, glide.frames, glide.slowest * 1000))

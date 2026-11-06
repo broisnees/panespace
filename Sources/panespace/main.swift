@@ -11,8 +11,9 @@ panespace \(panespaceVersion) — i3-style tiling window manager for macOS
 USAGE
   panespace                      start the window manager (foreground)
   panespace msg <command>        run an i3 command, e.g. panespace msg focus left
-  panespace msg -t <type>        query: get_tree, get_workspaces, get_bindings, get_binding_modes, get_config, get_version
+  panespace msg -t <type>        query: get_tree, get_workspaces, get_bindings, get_binding_modes, get_config, get_version, get_stats
   panespace <command>            shorthand for `panespace msg <command>`
+  panespace stats                speed and cost: key-to-frame latency, frame rate, scans, CPU, memory
   panespace list-windows         show every window and how panespace classifies it (for writing rules)
   panespace preview-indicator <png>  render every menu bar indicator look to an image
   panespace check-config [path]  parse a config and print warnings
@@ -132,6 +133,31 @@ func listWindows() -> Never {
     exit(0)
 }
 
+/// `panespace stats`: the daemon's numbers, readable.
+func printStats() -> Never {
+    guard let resp = IPC.send(type: "get_stats", payload: ""), let data = resp.data(using: .utf8),
+          let s = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+        fputs("panespace: not running (no socket at \(IPC.socketPath))\n", stderr)
+        exit(1)
+    }
+    func n(_ k: String) -> String { s[k].map { "\($0)" } ?? "–" }
+    func dist(_ k: String) -> String {
+        guard let d = s[k] as? [String: Any], let med = d["median"] else { return "no samples yet" }
+        return "median \(med) ms · p95 \(d["p95"] ?? "–") ms · worst \(d["max"] ?? "–") ms  (\(d["samples"] ?? 0) samples)"
+    }
+    let up = (s["uptime_s"] as? Int) ?? 0
+    print("""
+    Panespace \(panespaceVersion), up \(up / 3600)h \(up / 60 % 60)m
+      key → first frame  \(dist("key_to_frame_ms"))
+      animations         \(n("animations")) · \(n("fps_avg")) fps average · slowest frame \(n("slowest_frame_ms")) ms
+      window scans       \(n("syncs")) · \(dist("sync_ms"))
+      CPU                \(n("cpu_avg_percent"))% average · \(n("cpu_recent_percent"))% last few minutes
+      memory             \(n("memory_mb")) MB · \(n("threads")) threads
+      managing           \(n("windows")) windows · \(n("workspaces")) workspaces · \(n("displays")) displays · \(n("commands")) commands run
+    """)
+    exit(0)
+}
+
 let args = Array(CommandLine.arguments.dropFirst())
 switch args.first {
 case nil, "start": runDaemon()
@@ -144,6 +170,7 @@ case "msg":
     }
     send(type, a.joined(separator: " "))
 case "list-windows": listWindows()
+case "stats": printStats()
 case "preview-indicator":
     WorkspaceIcon.writePreview(to: URL(fileURLWithPath: args.count > 1 ? args[1] : "indicator-preview.png"))
 case "check-config":

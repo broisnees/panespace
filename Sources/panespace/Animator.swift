@@ -70,6 +70,9 @@ enum Animator {
         var slowest = 0.0
         /// How long finding the start frames took, before the first frame.
         var setup = 0.0
+        /// When the first frame was on screen (`CACurrentMediaTime`), and how long the glide lasted.
+        var firstFrameAt: Double?
+        var seconds = 0.0
     }
 
     private final class Track {
@@ -224,6 +227,7 @@ enum Animator {
                 if first {
                     write()  // a tiny step, not worth holding the screen for while waiting on a busy app
                     let started = CACurrentMediaTime()
+                    result.firstFrameAt = started
                     for g in groups.indices { seen[g] = started }
                     first = false
                 } else {
@@ -267,6 +271,8 @@ enum Animator {
             if lock.withLock({ enhanced[g] }) { app.set("AXEnhancedUserInterface", true) }
             AXUIElementSetMessagingTimeout(app, 0)
         }
+        result.firstFrameAt = result.firstFrameAt ?? CACurrentMediaTime()  // nothing to glide: written in place
+        result.seconds = CACurrentMediaTime() - (result.firstFrameAt ?? began)
         return result
     }
 

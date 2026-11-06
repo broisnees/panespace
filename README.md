@@ -90,7 +90,8 @@ Run `panespace check-config` to find mistakes, and `panespace list-windows` to s
 ```sh
 panespace msg workspace 3
 panespace msg '[app="Safari"] focus'
-panespace msg -t get_tree        # get_workspaces, get_config, get_version, …
+panespace msg -t get_tree        # get_workspaces, get_config, get_version, get_stats, …
+panespace stats                  # key-to-frame latency, frame rate, scan times, CPU, memory
 ```
 
 ## Caps
