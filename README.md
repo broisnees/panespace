@@ -22,6 +22,7 @@
 - **Instant workspaces.** Panespace keeps its own workspaces, separate from macOS Spaces. Switching has no animation.
 - **i3 config syntax.** `bindsym`, modes, `for_window` / `assign` rules, gaps, scratchpad, `back_and_forth`.
 - **Mouse.** Drag the edge between two windows and both resize live. Drag a window by its title bar (or `$mod`+drag) and a box shows where it will land: on another window's middle they swap, near an edge it goes beside it on that side, on an empty display it takes the display. Tabs dragged out of a browser or terminal stay on the display you drop them on. Double-click a title bar to zoom that window to the full screen; double-click again to put it back.
+- **Window hints.** `hints` puts a letter on every window you can see, on every display; type it to jump there. `hints swap` swaps the focused window with the one you pick.
 - **Window switcher.** `switcher` searches every window by app, title or workspace.
 - **Trackpad gestures.** Swipe sideways with four fingers and the workspaces follow your fingers like Spaces, snapping to the nearest one when you lift. Swipe up to zoom the focused window, down to put it back. Set `gesture_fingers 3` to use three, and turn off macOS's own swipes with the same finger count in System Settings → Trackpad → More Gestures.
 - **Animations.** Windows glide when the layout changes: opening and closing, moving and swapping, resizing, and switching workspaces, which slide like macOS Spaces. Turn them off with `animations no`.
@@ -61,6 +62,7 @@ Before you start:
 | `$mod+w` / `$mod+s` / `$mod+e` | Tabbed / stacking / toggle split |
 | `$mod+f` / `$mod+Shift+f` | Fullscreen / immersive mode |
 | `$mod+Shift+space` | Float or tile the window |
+| `$mod+;` / `$mod+Shift+;` | Window hints: jump to / swap with a window |
 | `$mod+/` | Search all windows |
 | `$mod+r` | Resize mode: `hjkl` or arrows, `b` to balance, Esc to leave |
 | `$mod+Shift+q` | Close the window |

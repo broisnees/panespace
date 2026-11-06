@@ -54,6 +54,8 @@ bindsym $mod+Right focus right
 bindsym $mod+a focus parent
 bindsym $mod+Shift+a focus child
 bindsym $mod+space focus mode_toggle
+bindsym $mod+semicolon hints              # a letter on every window you can see: type it to jump there
+bindsym $mod+Shift+semicolon hints swap   # …or to swap the focused window with that one (any display)
 bindsym $mod+slash switcher               # search every window by app or title
 
 # ── Move ────────────────────────────────────────────────
@@ -115,6 +117,7 @@ bindsym $mod+Tab workspace back_and_forth
 bindsym $mod+bracketright workspace next_on_output
 bindsym $mod+bracketleft workspace prev_on_output
 bindsym $mod+Shift+period move workspace to output next
+bindsym $mod+Shift+comma swap workspace with output next   # the two displays trade workspaces
 
 # Pin workspaces to monitors (primary, secondary, 1, 2, or part of the display name):
 # workspace 9 output secondary primary

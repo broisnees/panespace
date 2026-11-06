@@ -41,6 +41,8 @@ public enum Command: Equatable {
     case moveToWorkspace(WorkspaceTarget)
     case moveToOutput(OutputTarget)
     case moveWorkspaceToOutput(OutputTarget)
+    /// panespace: the focused workspace and the one shown on that output trade displays.
+    case swapWorkspaceWithOutput(OutputTarget)
     case moveToScratchpad
     case movePositionCenter
     case scratchpadShow
@@ -58,6 +60,8 @@ public enum Command: Equatable {
     case immersive(Toggle)
     /// panespace: a search box over every window (type, arrows, Return to jump to it).
     case switcher
+    /// panespace: a letter on every window you can see; type it to focus that window (`swap`: trade places with it).
+    case hints(swap: Bool)
     case kill
     case reload
     case exit
@@ -186,6 +190,9 @@ public enum CommandParser {
         case "balance": return .balance
         case "immersive": return .immersive(try toggle(arg(0) ?? "toggle"))
         case "switcher": return .switcher
+        case "hints":
+            guard lower.isEmpty || lower == ["swap"] || lower == ["focus"] else { throw ParseError("hints takes 'focus' or 'swap'") }
+            return .hints(swap: lower == ["swap"])
         case "mode":
             guard let m = a.first else { throw ParseError("mode needs a name") }
             return .mode(m)
@@ -202,6 +209,14 @@ public enum CommandParser {
             case "output": return .focusOutput(try output(Array(a.dropFirst())))
             default: throw ParseError("unknown focus target '\(x)'")
             }
+
+        case "swap":
+            // swap workspace with output next | swap workspaces (= with the next output)
+            if lower == ["workspaces"] { return .swapWorkspaceWithOutput(.next) }
+            guard arg(0) == "workspace", arg(1) == "with", arg(2) == "output", a.count > 3 else {
+                throw ParseError("expected 'swap workspace with output <output>' or 'swap workspaces'")
+            }
+            return .swapWorkspaceWithOutput(try output(Array(a[3...])))
 
         case "move":
             var i = 0

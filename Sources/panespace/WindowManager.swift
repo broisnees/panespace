@@ -94,6 +94,7 @@ final class WindowManager {
     private let statusBar = StatusBar()
     private let border = FocusBorder()
     private let dropPreview = DropPreview()
+    private let hintsOverlay = HintsOverlay()
     let stats = Stats()
     /// When the command being applied was asked for (key press or CLI), to time it to the first frame.
     private var commandAt: Double?
@@ -528,6 +529,7 @@ final class WindowManager {
                 chrome.set(t == .toggle ? !chrome.isImmersive : t == .enable)
                 updateStatus()
             case .switcher: DispatchQueue.main.async { self.openSwitcher() }
+            case .hints(let swap): DispatchQueue.main.async { self.openHints(swap: swap) }
             }
         }
     }
@@ -552,6 +554,19 @@ final class WindowManager {
     }
 
     /// Window hints over every visible window. Picking one focuses it (or swaps it with the focused one); either
+    /// way the keyboard goes back to a real window afterwards.
+    private func openHints(swap: Bool) {
+        hintsOverlay.show(model.hints()) { [weak self] id in
+            guard let self else { return }
+            userAsked = true
+            defer { userAsked = false }
+            if let id, model.windows[id] != nil { model.pickHint(id, swap: swap) }
+            lastFocused = nil
+            pendingFocus = nil
+            apply()
+        }
+    }
+
     private func exec(_ cmd: String) {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/bin/sh")

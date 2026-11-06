@@ -84,6 +84,7 @@ final class StatusBar: NSObject, NSMenuDelegate {
         // Quick controls: the things worth reaching without remembering a key.
         menu.addItem(header("Quick Controls"))
         menu.addItem(commandItem("Find Window…", "switcher", symbol: "magnifyingglass"))
+        menu.addItem(commandItem("Window Hints", "hints", symbol: "character.cursor.ibeam"))
         menu.addItem(commandItem("Previous Workspace", "workspace prev", symbol: "chevron.left"))
         menu.addItem(commandItem("Next Workspace", "workspace next", symbol: "chevron.right"))
         menu.addItem(commandItem("Last Workspace", "workspace back_and_forth", symbol: "arrow.uturn.backward"))
@@ -95,6 +96,8 @@ final class StatusBar: NSObject, NSMenuDelegate {
             }
             menu.addItem(commandItem("Send Workspace to Other Display", "move workspace to output next",
                                      symbol: "rectangle.portrait.on.rectangle.portrait"))
+            menu.addItem(commandItem("Swap Displays' Workspaces", "swap workspace with output next",
+                                     symbol: "rectangle.2.swap"))
         }
         if model.focusedWindow != nil {
             menu.addItem(commandItem("Close Window", "kill", symbol: "xmark.square"))
