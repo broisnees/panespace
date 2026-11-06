@@ -51,7 +51,10 @@ public enum IPC {
     }
 
     /// Accepts connections on a background thread; `handler` runs on the main thread.
-    public static func serve(_ handler: @escaping (_ type: String, _ payload: String) -> String) -> Bool {
+    /// `offMain` answers first, on the IPC thread, for requests that would block the main thread (nil = not
+    /// mine); everything else goes to `handler` on the main thread.
+    public static func serve(_ handler: @escaping (_ type: String, _ payload: String) -> String,
+                             offMain: ((_ type: String, _ payload: String) -> String?)? = nil) -> Bool {
         unlink(socketPath)
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0, withAddress(socketPath, { bind(fd, $0, $1) }) == 0, listen(fd, 16) == 0 else { return false }
@@ -64,7 +67,7 @@ public enum IPC {
                 let (type, payload) = req.firstIndex(of: "\n").map {
                     (String(req[..<$0]), String(req[req.index(after: $0)...]))
                 } ?? (req, "")
-                let resp = DispatchQueue.main.sync { handler(type, payload) }
+                let resp = offMain?(type, payload) ?? DispatchQueue.main.sync { handler(type, payload) }
                 writeAll(client, Data(resp.utf8))
                 close(client)
             }

@@ -1,5 +1,7 @@
 import AppKit
+import PanespaceCore
 import ApplicationServices
+import MacKit
 
 /// Private but stable since 10.x; maps an AX window to its CGWindowID. Exported from HIServices.
 @_silgen_name("_AXUIElementGetWindow") @discardableResult
@@ -26,6 +28,8 @@ extension AXUIElement {
     var subrole: String? { string(kAXSubroleAttribute) }
     var title: String { string(kAXTitleAttribute) ?? "" }
     var isMinimized: Bool { bool(kAXMinimizedAttribute) ?? false }
+    /// In macOS full screen (its own Space), or on its way there.
+    var isFullScreen: Bool { bool("AXFullScreen") ?? false }
     var focusedWindow: AXUIElement? { element(kAXFocusedWindowAttribute) }
 
     var windows: [AXUIElement] {
@@ -98,32 +102,21 @@ extension AXUIElement {
     func perform(_ action: String) -> Bool { AXUIElementPerformAction(self, action as CFString) == .success }
 }
 
-/// Window classification, after AeroSpace/yabai heuristics.
-enum WindowKind { case tile, float, ignore }
-
-/// Apps whose real windows lack (or briefly disable) the fullscreen button.
-private let tileAnyway: Set<String> = [
-    "org.alacritty", "net.kovidgoyal.kitty", "com.github.wez.wezterm", "org.gnu.Emacs", "com.mitchellh.ghostty",
-    "com.microsoft.VSCode", "com.google.Chrome", "com.brave.Browser", "com.microsoft.edgemac",
-    "org.chromium.Chromium", "com.vivaldi.Vivaldi", "company.thebrowser.Browser", "org.gimp.gimp-2.10",
-]
+/// Reads what classification needs from a window (a few AX calls), for `WindowTraits.kind`.
+func traits(_ w: AXUIElement, bundleID: String, layer: Int?) -> WindowTraits {
+    let role = w.role ?? ""
+    guard role == kAXWindowRole, layer ?? 0 == 0 else { return WindowTraits(bundleID: bundleID, role: role, layer: layer) }
+    let fs = w.element(kAXFullScreenButtonAttribute)
+    return WindowTraits(bundleID: bundleID, role: role, subrole: w.subrole ?? "", title: w.title,
+                        identifier: w.string("AXIdentifier"),
+                        hasCloseButton: w.element(kAXCloseButtonAttribute) != nil,
+                        hasMinimizeButton: w.element(kAXMinimizeButtonAttribute) != nil,
+                        fullScreenButtonEnabled: fs.map { $0.bool(kAXEnabledAttribute) ?? true },
+                        sizeSettable: w.isSettable(kAXSizeAttribute), layer: layer)
+}
 
 func classify(_ w: AXUIElement, bundleID: String, layer: Int?) -> WindowKind {
-    guard w.role == kAXWindowRole else { return .ignore }
-    if let layer, layer != 0 { return .ignore }
-    let subrole = w.subrole ?? ""
-    switch subrole {
-    case kAXStandardWindowSubrole:
-        if tileAnyway.contains(bundleID) { return .tile }
-        let fullscreen = w.element(kAXFullScreenButtonAttribute)
-        if fullscreen == nil || fullscreen?.bool(kAXEnabledAttribute) == false { return .float }
-        if !w.isSettable(kAXSizeAttribute) { return .float }
-        return .tile
-    case kAXDialogSubrole, kAXFloatingWindowSubrole, kAXSystemDialogSubrole:
-        return w.element(kAXCloseButtonAttribute) == nil && w.title.isEmpty ? .ignore : .float
-    default:
-        return .ignore
-    }
+    traits(w, bundleID: bundleID, layer: layer).kind
 }
 
 /// Window number → layer, for every window the window server knows (also off-screen).
@@ -144,4 +137,33 @@ func windowServerSnapshot() -> [CGWindowID: ServerWindow] {
         }
     }
     return out
+}
+
+/// `panespace msg -t get_windows`: every window of every app as Accessibility sees it, managed or not, with how
+/// Panespace classifies it. Read inside the daemon (which has the permission), off the main thread.
+func allWindowsJSON() -> String {
+    let server = windowServerSnapshot()
+    var rows: [[String: Any]] = []
+    for app in NSWorkspace.shared.runningApplications where app.activationPolicy == .regular {
+        let el = AXUIElement.app(app.processIdentifier)
+        AXUIElementSetMessagingTimeout(el, 0.5)
+        for w in el.windows {
+            guard let id = w.windowID else { continue }
+            var row: [String: Any] = [
+                "id": Int(id), "app": app.localizedName ?? "?", "bundle_id": app.bundleIdentifier ?? "",
+                "kind": classify(w, bundleID: app.bundleIdentifier ?? "", layer: server[id]?.layer).rawValue,
+                "identifier": w.string("AXIdentifier") ?? "",
+                "size_settable": w.isSettable(kAXSizeAttribute),
+                "fullscreen_enabled": w.element(kAXFullScreenButtonAttribute).map { $0.bool(kAXEnabledAttribute) ?? true } as Any,
+                "role": w.role ?? "", "subrole": w.subrole ?? "", "title": w.title,
+                "fullscreen": w.isFullScreen, "minimized": w.isMinimized,
+                "buttons": [kAXCloseButtonAttribute, kAXMinimizeButtonAttribute, kAXZoomButtonAttribute, kAXFullScreenButtonAttribute]
+                    .filter { w.element($0) != nil },
+            ]
+            if let f = w.frame { row["frame"] = [Int(f.minX), Int(f.minY), Int(f.width), Int(f.height)] }
+            if let s = server[id] { row["layer"] = s.layer }
+            rows.append(row)
+        }
+    }
+    return IPC.json(rows)
 }

@@ -207,7 +207,9 @@ final class WindowManager {
         }
         if !tap.start() { log("could not create the event tap; hotkeys are disabled") }
         applyBindings()
-        if !IPC.serve({ [unowned self] in handleIPC($0, $1) }) { log("could not open \(IPC.socketPath)") }
+        if !IPC.serve({ [unowned self] in handleIPC($0, $1) }, offMain: { type, _ in type == "get_windows" ? allWindowsJSON() : nil }) {
+            log("could not open \(IPC.socketPath)")
+        }
 
         let nc = NSWorkspace.shared.notificationCenter
         func pid(_ n: Notification) -> pid_t? {
