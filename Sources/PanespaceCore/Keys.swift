@@ -61,6 +61,21 @@ public struct KeyCombo: Hashable, CustomStringConvertible {
 
 /// X11 keysym names → macOS virtual key codes (ANSI positions).
 public enum Keys {
+    /// The current keyboard layout's characters → key codes, set by the app (nil = US positions). Key names that
+    /// stand for a character ("q", "1", "bracketleft") follow it, so a binding means the key that types it; names
+    /// it can't type (a Devanagari or Cyrillic layout) keep their US position.
+    public static var layout: [String: UInt16]?
+
+    /// The character a key name stands for.
+    static func character(_ name: String) -> String? {
+        if name.count == 1 { return name }
+        return [
+            "bracketleft": "[", "leftbracket": "[", "bracketright": "]", "rightbracket": "]", "semicolon": ";",
+            "apostrophe": "'", "quote": "'", "comma": ",", "period": ".", "slash": "/", "backslash": "\\",
+            "grave": "`", "backtick": "`", "quoteleft": "`", "minus": "-", "dash": "-", "equal": "=", "plus": "+",
+        ][name]
+    }
+
     static let table: [String: UInt16] = {
         var t: [String: UInt16] = [
             "a": 0x00, "s": 0x01, "d": 0x02, "f": 0x03, "h": 0x04, "g": 0x05, "z": 0x06, "x": 0x07,
@@ -93,9 +108,16 @@ public enum Keys {
         return t
     }()
 
-    public static func code(for name: String) -> UInt16? { table[name.lowercased()] }
+    public static func code(for name: String) -> UInt16? {
+        let n = name.lowercased()
+        if let layout, let ch = character(n), let code = layout[ch] { return code }
+        return table[n]
+    }
 
     public static func name(for code: UInt16) -> String? {
-        table.filter { $0.value == code }.map(\.key).min { $0.count < $1.count || ($0.count == $1.count && $0 < $1) }
+        // What the key types in the current layout: a letter or digit reads better than its US name.
+        if let layout, let ch = layout.filter({ $0.value == code }).map(\.key)
+            .filter({ $0.allSatisfy { $0.isLetter || $0.isNumber } }).min() { return ch }
+        return table.filter { $0.value == code }.map(\.key).min { $0.count < $1.count || ($0.count == $1.count && $0 < $1) }
     }
 }

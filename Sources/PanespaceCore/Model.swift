@@ -34,6 +34,7 @@ public enum Effect: Equatable {
     case exit
     case immersive(Toggle)
     case switcher
+    case hints(swap: Bool)
 }
 
 public struct CommandResult {

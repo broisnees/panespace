@@ -42,6 +42,7 @@ extension Model {
         case .exit: return [.exit]
         case .immersive(let t): return [.immersive(t)]
         case .switcher: return [.switcher]
+        case .hints(let swap): return [.hints(swap: swap)]
         case .kill:
             return node.map { windows(in: $0).map { .close($0.id) } } ?? []
         case .mode(let m):
@@ -100,6 +101,17 @@ extension Model {
 
         case .moveWorkspaceToOutput(let t):
             moveWorkspace(focusedWorkspace, to: t)
+
+        case .swapWorkspaceWithOutput(let t):
+            let a: Workspace = focusedWorkspace
+            guard let ma = monitor(a.monitorID), let mb = resolveOutput(t), mb.id != ma.id, let b = visible[mb.id] else { break }
+            translateFloating(a, from: ma, to: mb)
+            translateFloating(b, from: mb, to: ma)
+            (a.monitorID, b.monitorID) = (mb.id, ma.id)
+            (a.homeMonitor, b.homeMonitor) = (mb.name, ma.name)  // the user put them there
+            (visible[mb.id], visible[ma.id]) = (a, b)
+            noteShown(b)
+            noteShown(a)
 
         case .moveToScratchpad:
             if let w = win { hideToScratchpad(w) }

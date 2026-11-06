@@ -94,6 +94,7 @@ final class WindowManager {
     private let statusBar = StatusBar()
     private let border = FocusBorder()
     private let dropPreview = DropPreview()
+    private let hintsOverlay = HintsOverlay()
     let stats = Stats()
     /// When the command being applied was asked for (key press or CLI), to time it to the first frame.
     private var commandAt: Double?
@@ -318,6 +319,7 @@ final class WindowManager {
 
         statusBar.install(manager: self)
         watchConfig()
+        inputSourceObserver = KeyboardLayout.observe { [weak self] in self?.inputSourceChanged() }
         checkSpaces()
         if let want = model.config.immersive { chrome.set(want) }
         requestSync(.all)
@@ -426,7 +428,14 @@ final class WindowManager {
             try? DefaultConfig.text.write(to: url, atomically: true, encoding: .utf8)
         }
         let text = (try? String(contentsOf: url, encoding: .utf8)) ?? DefaultConfig.text
-        let c = Config.parse(text)
+        // Key names mean US positions unless the config lets them follow the keyboard layout, which is only known
+        // once it's parsed: parse again with the layout if it's on (parsing takes well under a millisecond).
+        Keys.layout = nil
+        var c = Config.parse(text)
+        if c.keyLayoutFollowsInput, let layout = KeyboardLayout.current() {
+            Keys.layout = layout
+            c = Config.parse(text)
+        }
         return (c, c.warnings)
     }
 
@@ -467,6 +476,18 @@ final class WindowManager {
         src.setCancelHandler { close(fd) }
         src.resume()
         configWatcher = src
+    }
+
+    private var inputSourceObserver: NSObjectProtocol?
+
+    /// Another keyboard layout was picked: bindings follow it (when `key_layout auto`).
+    private func inputSourceChanged() {
+        guard model.config.keyLayoutFollowsInput, KeyboardLayout.current() != Keys.layout else { return }
+        let (c, w) = WindowManager.loadConfig(configURL)
+        configWarnings = w
+        model.setConfig(c)
+        applyBindings()
+        log("keyboard layout changed; bindings follow it")
     }
 
     func reload() {
@@ -528,6 +549,7 @@ final class WindowManager {
                 chrome.set(t == .toggle ? !chrome.isImmersive : t == .enable)
                 updateStatus()
             case .switcher: DispatchQueue.main.async { self.openSwitcher() }
+            case .hints(let swap): DispatchQueue.main.async { self.openHints(swap: swap) }
             }
         }
     }
@@ -552,6 +574,19 @@ final class WindowManager {
     }
 
     /// Window hints over every visible window. Picking one focuses it (or swaps it with the focused one); either
+    /// way the keyboard goes back to a real window afterwards.
+    private func openHints(swap: Bool) {
+        hintsOverlay.show(model.hints()) { [weak self] id in
+            guard let self else { return }
+            userAsked = true
+            defer { userAsked = false }
+            if let id, model.windows[id] != nil { model.pickHint(id, swap: swap) }
+            lastFocused = nil
+            pendingFocus = nil
+            apply()
+        }
+    }
+
     private func exec(_ cmd: String) {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/bin/sh")

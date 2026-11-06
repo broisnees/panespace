@@ -31,6 +31,7 @@ focus_wrapping yes
 mouse_warping output          # move the mouse along when focus jumps to another monitor
 floating_modifier $mod        # hold it and drag: left = move, right = resize. A box shows where a tiled window lands.
 focus_follows_mouse no
+key_layout auto               # keys follow your keyboard layout (AZERTY, Dvorak…); "qwerty" = US key positions
 smooth_layout yes             # workspace switches without a flash of empty desktop
 animations yes                # windows glide when the layout changes
 animation_duration 180        # milliseconds until a move looks finished (it moves on a spring)
@@ -54,6 +55,8 @@ bindsym $mod+Right focus right
 bindsym $mod+a focus parent
 bindsym $mod+Shift+a focus child
 bindsym $mod+space focus mode_toggle
+bindsym $mod+semicolon hints              # a letter on every window you can see: type it to jump there
+bindsym $mod+Shift+semicolon hints swap   # …or to swap the focused window with that one (any display)
 bindsym $mod+slash switcher               # search every window by app or title
 
 # ── Move ────────────────────────────────────────────────
@@ -115,6 +118,7 @@ bindsym $mod+Tab workspace back_and_forth
 bindsym $mod+bracketright workspace next_on_output
 bindsym $mod+bracketleft workspace prev_on_output
 bindsym $mod+Shift+period move workspace to output next
+bindsym $mod+Shift+comma swap workspace with output next   # the two displays trade workspaces
 
 # Pin workspaces to monitors (primary, secondary, 1, 2, or part of the display name):
 # workspace 9 output secondary primary

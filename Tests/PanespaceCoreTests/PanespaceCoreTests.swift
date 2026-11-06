@@ -624,6 +624,61 @@ final class MultiMonitorTests: XCTestCase {
         XCTAssertEqual(m.focusedWindow?.id, 4)
     }
 
+    func testHintsCoverEveryVisibleWindowInReadingOrder() {
+        add(1, at: 10)
+        add(2, at: 10)
+        add(3, at: 1500)
+        m.addWindow(9, info: WindowInfo(app: "A"), floating: true, frame: CGRect(x: 1100, y: 300, width: 100, height: 100))
+        m.run("workspace 7")  // a hidden workspace's windows get no hint
+        m.addWindow(8, info: WindowInfo(app: "A"), floating: false, frame: nil)
+        m.run("workspace 1")
+        // Left display first (left to right), then the right one (top to bottom): 3 above the floating 9.
+        XCTAssertEqual(m.hints().map(\.id), [1, 2, 3, 9])
+        XCTAssertEqual(m.hints().map(\.key), ["a", "s", "d", "f"])
+        // A tab group shows one hint, for the tab in front.
+        m.osFocused(1)
+        m.run("layout tabbed")
+        XCTAssertEqual(m.hints().map(\.id), [1, 3, 9])
+        // Full screen: only that window on its display.
+        m.run("fullscreen enable")
+        XCTAssertEqual(m.hints().first?.frame, mon1.visibleFrame)
+        XCTAssertEqual(m.hints().map(\.id), [1, 3, 9])
+    }
+
+    func testSwapWorkspacesBetweenDisplays() {
+        add(1, at: 10)
+        add(2, at: 1500)
+        m.addWindow(9, info: WindowInfo(app: "A"), floating: true, frame: CGRect(x: 100, y: 100, width: 200, height: 200),
+                    useMonitorOfFrame: true)
+        m.osFocused(1)
+        m.run("swap workspace with output next")
+        XCTAssertEqual(m.visible[2]?.name, "1")
+        XCTAssertEqual(m.visible[1]?.name, "2")
+        XCTAssertEqual(m.focusedWorkspace.name, "1")  // focus goes with it
+        XCTAssertEqual(m.focusedMonitor.id, 2)
+        XCTAssertEqual(m.windows[9]?.floatingFrame?.minX, 1100)  // floating windows come along, same spot
+        m.setMonitors([mon1])  // unplug, replug: each goes back to where the user put it
+        m.setMonitors([mon1, mon2])
+        XCTAssertEqual(m.visible[2]?.name, "1")
+        XCTAssertEqual(m.visible[1]?.name, "2")
+        XCTAssertEqual(try CommandParser.parse("swap workspaces")[0].command, .swapWorkspaceWithOutput(.next))
+        XCTAssertThrowsError(try CommandParser.parse("swap workspace output 2"))
+    }
+
+    func testHintSwapAcrossDisplays() {
+        add(1, at: 10)
+        add(2, at: 10)
+        add(3, at: 1500)
+        m.osFocused(1)
+        m.pickHint(3, swap: true)
+        XCTAssertEqual(m.windows[1]?.workspace?.name, "2")
+        XCTAssertEqual(m.windows[3]?.workspace?.name, "1")
+        XCTAssertEqual(m.focusedWindow?.id, 1)
+        m.pickHint(2, swap: false)  // plain pick: focus follows
+        XCTAssertEqual(m.focusedWindow?.id, 2)
+        XCTAssertEqual(m.focusedWorkspace.name, "1")
+    }
+
     func testNewFloatingWindowJoinsTheWorkspaceOnItsDisplay() {
         add(1, at: 10)
         m.osFocused(1)
@@ -654,6 +709,30 @@ final class MultiMonitorTests: XCTestCase {
         XCTAssertEqual(m.visible[2]?.name, "9")
         m.run("workspace 9")
         XCTAssertEqual(m.focusedMonitor.id, 2)
+    }
+}
+
+final class KeyLayoutTests: XCTestCase {
+    override func tearDown() { Keys.layout = nil }
+
+    func testBindingsFollowTheKeyboardLayout() {
+        // AZERTY: A and Q swap places, digits are typed with shift (1 is shift+&), no [ key without AltGr.
+        Keys.layout = ["q": 0x00, "a": 0x0C, "z": 0x0D, "w": 0x06, "&": 0x12, "1": 0x12, "é": 0x13, "2": 0x13]
+        XCTAssertEqual(KeyCombo.parse("alt+a")?.keyCode, 0x0C)
+        XCTAssertEqual(KeyCombo.parse("alt+q")?.keyCode, 0x00)
+        XCTAssertEqual(KeyCombo.parse("alt+shift+2")?.keyCode, 0x13)
+        XCTAssertEqual(KeyCombo.parse("alt+bracketleft")?.keyCode, 0x21)  // not typable: US position
+        XCTAssertEqual(KeyCombo.parse("alt+space")?.keyCode, 0x31)        // not a character: unchanged
+        XCTAssertEqual(KeyCombo.parse("alt+1")?.description, "alt+1")     // shown as what the binding says
+        XCTAssertEqual(Keys.name(for: 0x0C), "a")
+        Keys.layout = nil
+        XCTAssertEqual(KeyCombo.parse("alt+a")?.keyCode, 0x00)
+    }
+
+    func testKeyLayoutOption() {
+        XCTAssertTrue(Config.parse("").keyLayoutFollowsInput)
+        XCTAssertFalse(Config.parse("key_layout qwerty").keyLayoutFollowsInput)
+        XCTAssertFalse(Config.parse("key_layout bogus").warnings.isEmpty)
     }
 }
 
@@ -734,6 +813,9 @@ final class ParserTests: XCTestCase {
         let p = try CommandParser.parse("exec osascript -e 'tell app \"Terminal\" to activate'")
         XCTAssertEqual(p[0].command, .exec("osascript -e 'tell app \"Terminal\" to activate'"))
         XCTAssertEqual(try CommandParser.parse("exec \"open -a Safari\"")[0].command, .exec("open -a Safari"))
+        XCTAssertEqual(try CommandParser.parse("hints")[0].command, .hints(swap: false))
+        XCTAssertEqual(try CommandParser.parse("hints swap")[0].command, .hints(swap: true))
+        XCTAssertThrowsError(try CommandParser.parse("hints nope"))
     }
 
     func testVariousCommands() throws {
