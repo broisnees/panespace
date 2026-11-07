@@ -300,9 +300,20 @@ final class TreeTests: XCTestCase {
         XCTAssertEqual(frame(1), mon1.visibleFrame)
     }
 
+    func testFullscreenIsMacOSFullScreen() {
+        add(1, 2)
+        XCTAssertEqual(m.run("fullscreen toggle").effects, [.nativeFullscreen(2, .toggle)])
+        XCTAssertNil(ws.fullscreen)  // the window leaves the layout through macOS, not a Panespace zoom
+        var c = Config.parse("native_fullscreen panespace")
+        c.gaps = m.config.gaps
+        m.setConfig(c)
+        XCTAssertEqual(m.run("fullscreen toggle").effects, [])
+        XCTAssertEqual(frame(2), mon1.visibleFrame)
+    }
+
     func testFullscreenAndFloating() {
         add(1, 2)
-        run("fullscreen toggle")
+        run("zoom toggle")
         XCTAssertEqual(frame(2), mon1.visibleFrame)
         run("focus left")  // focusing another window drops fullscreen
         XCTAssertNil(ws.fullscreen)
@@ -536,8 +547,8 @@ final class MultiMonitorTests: XCTestCase {
         m.addWindow(5, info: WindowInfo(app: "A"), floating: true, frame: CGRect(x: 100, y: 100, width: 300, height: 200))
         m.osFocused(5)
         m.clearDirty(5)
-        m.run("fullscreen toggle")
-        m.run("fullscreen toggle")
+        m.run("zoom toggle")
+        m.run("zoom toggle")
         XCTAssertEqual(m.windows[5]?.floatingFrameDirty, true)
     }
 
@@ -640,7 +651,7 @@ final class MultiMonitorTests: XCTestCase {
         m.run("layout tabbed")
         XCTAssertEqual(m.hints().map(\.id), [1, 3, 9])
         // Full screen: only that window on its display.
-        m.run("fullscreen enable")
+        m.run("zoom enable")
         XCTAssertEqual(m.hints().first?.frame, mon1.visibleFrame)
         XCTAssertEqual(m.hints().map(\.id), [1, 3, 9])
     }
@@ -831,7 +842,9 @@ final class ParserTests: XCTestCase {
         XCTAssertEqual(try c("immersive"), .immersive(.toggle))
         XCTAssertEqual(Config.parse("immersive yes").immersive, true)
         XCTAssertNil(Config().immersive)
-        XCTAssertTrue(Config().interceptNativeFullscreen)
+        XCTAssertFalse(Config().interceptNativeFullscreen)
+        XCTAssertTrue(Config.parse("native_fullscreen panespace").interceptNativeFullscreen)
+        XCTAssertEqual(try c("zoom"), .zoom(.toggle))
         XCTAssertTrue(Config().smoothLayout)
         XCTAssertFalse(Config.parse("smooth_layout no").smoothLayout)
         XCTAssertFalse(Config.parse("native_fullscreen macos").interceptNativeFullscreen)

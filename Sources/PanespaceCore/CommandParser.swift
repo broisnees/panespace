@@ -52,7 +52,10 @@ public enum Command: Equatable {
     case workspaceOnOutput(WorkspaceTarget, OutputTarget)
     case split(Orientation?)  // nil = toggle
     case layout(LayoutArg)
+    /// macOS full screen (its own Space, menu bar hidden), or with `native_fullscreen panespace` the zoom below.
     case fullscreen(Toggle)
+    /// Panespace zoom: the window fills its workspace and stays in the layout.
+    case zoom(Toggle)
     case floating(Toggle)
     case resize(ResizeArg)
     case balance
@@ -276,6 +279,7 @@ public enum CommandParser {
             }
 
         case "fullscreen": return .fullscreen(try toggle(arg(0) ?? "toggle"))
+        case "zoom": return .zoom(try toggle(arg(0) ?? "toggle"))
         case "floating":
             guard let x = arg(0) else { throw ParseError("floating needs enable, disable or toggle") }
             return .floating(try toggle(x))

@@ -35,6 +35,8 @@ public enum Effect: Equatable {
     case immersive(Toggle)
     case switcher
     case hints(swap: Bool)
+    /// Put a window into (or out of) macOS full screen. nil: whichever window is in front.
+    case nativeFullscreen(WindowID?, Toggle)
 }
 
 public struct CommandResult {

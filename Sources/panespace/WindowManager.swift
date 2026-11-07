@@ -550,7 +550,24 @@ final class WindowManager {
                 updateStatus()
             case .switcher: DispatchQueue.main.async { self.openSwitcher() }
             case .hints(let swap): DispatchQueue.main.async { self.openHints(swap: swap) }
+            case .nativeFullscreen(let id, let t): nativeFullscreen(id, t)
             }
+        }
+    }
+
+    /// Real macOS full screen. The window leaves the layout while it's there (checkSpaces parks it) and goes back
+    /// to its tile when it leaves. Whatever window is in front and already full screen is the one to take out:
+    /// the layout doesn't hold it, so the model's focused window is some other one.
+    private func nativeFullscreen(_ id: WindowID?, _ t: Toggle) {
+        let target = id.flatMap { elements[$0] }
+        let frontPid = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        axQueue.async {
+            if t != .enable, let pid = frontPid, let front = AXUIElement.app(pid).focusedWindow, front.isFullScreen {
+                front.set("AXFullScreen", false)
+                return
+            }
+            guard t != .disable, let el = target, !el.isFullScreen else { return }
+            el.set("AXFullScreen", true)
         }
     }
 
@@ -782,7 +799,7 @@ final class WindowManager {
         zoomedClick = click
         settling[id] = Date().addingTimeInterval(0.3)
         holdApplyUntil = Date().addingTimeInterval(0.25)
-        model.run("fullscreen toggle", on: id)
+        model.run("zoom toggle", on: id)
         unsure.insert(id)
         lastApplied[id] = nil
         appliedSize[id] = nil
@@ -1358,7 +1375,7 @@ final class WindowManager {
         for id in fullscreenOnReturn where model.windows[id] != nil {
             fullscreenOnReturn.remove(id)
             model.osFocused(id)
-            model.run("fullscreen enable", on: id)
+            model.run("zoom enable", on: id)
         }
         if !added.isEmpty { refreshOSFocus() }
         scheduleApply()
@@ -1763,7 +1780,7 @@ final class WindowManager {
     private func zoomGesture(_ up: Bool) {
         guard swipe == nil, let w = model.focusedWindow, !w.isFloating else { return }
         guard up != (w.workspace?.fullscreen === w) else { return }
-        model.run("fullscreen toggle", on: w.id)
+        model.run("zoom toggle", on: w.id)
         scheduleApply()
     }
 
