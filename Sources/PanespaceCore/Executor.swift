@@ -177,7 +177,11 @@ extension Model {
                 c.layout = items[((cur ?? -1) + 1) % items.count] ?? c.lastSplit
             }
 
-        case .fullscreen(let tg):
+        case .fullscreen(let tg) where !config.interceptNativeFullscreen:
+            // A window already in macOS full screen isn't in the layout: the app layer finds it.
+            return [.nativeFullscreen(win?.id, tg)]
+
+        case .fullscreen(let tg), .zoom(let tg):
             guard let w = win else { break }
             let on = tg == .toggle ? ws.fullscreen !== w : tg == .enable
             ws.fullscreen = on ? w : (ws.fullscreen === w ? nil : ws.fullscreen)

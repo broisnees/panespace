@@ -37,9 +37,9 @@ public struct Config {
     public var focusWrapping = true
     public var accordionPadding: CGFloat = 30
     public var floatingModifier: Modifiers?
-    /// ⌃⌘F / Globe+F and the green button use panespace fullscreen instead of a macOS full-screen Space
-    /// (windows on other Spaces can't be tiled). `native_fullscreen macos` turns this off.
-    public var interceptNativeFullscreen = true
+    /// `native_fullscreen panespace`: ⌃⌘F / Globe+F, the green button and `fullscreen` use Panespace zoom (the
+    /// window stays tiled, below the menu bar). Default `macos`: they all use real macOS full screen.
+    public var interceptNativeFullscreen = false
     /// Switching workspaces shows the new windows before parking the old ones, so the bare desktop never flashes.
     public var smoothLayout = true
     /// Layout changes glide instead of jumping (`animations no` turns it off).
@@ -250,7 +250,7 @@ public struct Config {
                 let colors = args.filter { $0.hasPrefix("#") }
                 if let col = colors.count >= 5 ? colors[4] : colors.first { c.borderColor = col } else { warn("client.focused needs colors") }
             case "immersive": c.immersive = bool(a.first)
-            case "native_fullscreen": c.interceptNativeFullscreen = a.first != "macos"
+            case "native_fullscreen": c.interceptNativeFullscreen = a.first == "panespace"
             case "smooth_layout": c.smoothLayout = bool(a.first)
             case "animations": c.animations = bool(a.first)
             case "gestures": c.gestures = bool(a.first)
