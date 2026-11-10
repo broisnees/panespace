@@ -213,7 +213,7 @@ final class SwitcherPanel: NSObject, NSTextFieldDelegate, NSTableViewDataSource,
         let redundantApp = e.title.compare(e.app, options: .caseInsensitive) == .orderedSame
         cell.set(icon: icon, title: e.title.isEmpty ? e.app : e.title,
                  detail: e.title.isEmpty || redundantApp ? "" : e.app,
-                 badge: e.workspace ?? "scratch", floating: e.isFloating, query: field.stringValue)
+                 badge: e.isAway ? "min" : e.workspace ?? "scratch", floating: e.isFloating, query: field.stringValue)
         return cell
     }
 }

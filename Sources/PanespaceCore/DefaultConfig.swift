@@ -19,6 +19,7 @@ gaps outer 8
 smart_gaps off
 accordion_padding 30          # how much of neighbouring windows peeks out in tabbed/stacking
 default_orientation auto      # horizontal on landscape monitors, vertical on portrait
+auto_split yes                # a new window splits the focused one along its longer side (Hyprland's dwindle); "no" = i3
 workspace_indicator number    # menu bar, current workspace: number | pill | panes | circle | minimal; all: segmented | dots | tiles
 default_border none           # "default_border pixel 2" draws an i3-style outline around the focused window
 border_radius 12
@@ -30,7 +31,10 @@ workspace_auto_back_and_forth no
 focus_wrapping yes
 mouse_warping output          # move the mouse along when focus jumps to another monitor
 floating_modifier $mod        # hold it and drag: left = move, right = resize. A box shows where a tiled window lands.
+workspace_scroll yes          # hold floating_modifier and scroll to go to the next/previous workspace
+which_key yes                 # while a mode (resize, a leader) is on, a panel lists its keys
 focus_follows_mouse no
+focus_on_window_activation smart   # an app bringing itself forward doesn't pull you to its workspace; Cmd-Tab and clicks still do. "focus" = always go there
 key_layout auto               # keys follow your keyboard layout (AZERTY, Dvorak…); "qwerty" = US key positions
 smooth_layout yes             # workspace switches without a flash of empty desktop
 animations yes                # windows glide when the layout changes
@@ -58,6 +62,7 @@ bindsym $mod+space focus mode_toggle
 bindsym $mod+semicolon hints              # a letter on every window you can see: type it to jump there
 bindsym $mod+Shift+semicolon hints swap   # …or to swap the focused window with that one (any display)
 bindsym $mod+slash switcher               # search every window by app or title
+bindsym fn+tab switcher                   # …or fn (Globe) + Tab. "bindsym fn …" alone fires on a tap of fn
 
 # ── Move ────────────────────────────────────────────────
 bindsym $mod+Shift+h move left
@@ -86,6 +91,8 @@ native_fullscreen macos
 # "immersive no" always starts with the menu bar shown; leave it unset to never change it at launch.
 bindsym $mod+Shift+f immersive toggle
 bindsym $mod+Shift+space floating toggle
+bindsym $mod+p pseudo toggle          # keep the window's own size, centered in its tile
+bindsym $mod+Shift+p pin toggle       # float it and keep it on screen on every workspace
 bindsym $mod+Shift+equal balance
 
 # ── Scratchpad ──────────────────────────────────────────
@@ -131,14 +138,15 @@ bindsym $mod+Shift+e exit
 # ── Resize mode ─────────────────────────────────────────
 bindsym $mod+r mode "resize"
 mode "resize" {
-    bindsym h resize shrink width 50 px or 5 ppt
-    bindsym j resize grow height 50 px or 5 ppt
-    bindsym k resize shrink height 50 px or 5 ppt
-    bindsym l resize grow width 50 px or 5 ppt
-    bindsym Left resize shrink width 50 px or 5 ppt
-    bindsym Down resize grow height 50 px or 5 ppt
-    bindsym Up resize shrink height 50 px or 5 ppt
-    bindsym Right resize grow width 50 px or 5 ppt
+    # Each key moves the window's border that way (left always moves it left, whichever side it is on).
+    bindsym h resize left 50 px or 5 ppt
+    bindsym j resize down 50 px or 5 ppt
+    bindsym k resize up 50 px or 5 ppt
+    bindsym l resize right 50 px or 5 ppt
+    bindsym Left resize left 50 px or 5 ppt
+    bindsym Down resize down 50 px or 5 ppt
+    bindsym Up resize up 50 px or 5 ppt
+    bindsym Right resize right 50 px or 5 ppt
     bindsym b balance
     bindsym Return mode "default"
     bindsym Escape mode "default"

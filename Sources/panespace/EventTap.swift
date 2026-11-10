@@ -27,6 +27,14 @@ final class EventTap {
     private var _mouseDown = false
     private var _trackMoves = false
     private var floatingModifier: Modifiers?
+    /// Held with the scroll wheel, goes to the next/previous workspace (`workspace_scroll`); nil = off.
+    private var scrollModifier: Modifiers?
+    /// Trackpad/Magic Mouse scrolling, summed until it is far enough for one workspace.
+    private var scrollTravel = 0.0
+    private var lastScrollSwitch = 0.0
+    /// When fn went down, and whether anything else happened before it came up (a tap of fn alone is a key).
+    private var fnDownAt = 0.0
+    private var fnUsed = true
     private var capsLock = false
     private var interceptFullscreen = true
     private var dragButton: CGMouseButton?
@@ -53,8 +61,9 @@ final class EventTap {
     var click: Click { lock.withLock { _click } }
 
     func setBindings(_ b: [KeyCombo: String], trackMouseMoves: Bool, floatingModifier: Modifiers?, capsLock: Bool,
-                     interceptFullscreen: Bool, oneShot: Bool = false) {
+                     interceptFullscreen: Bool, oneShot: Bool = false, scrollWorkspaces: Bool = false) {
         lock.withLock {
+            scrollModifier = scrollWorkspaces ? floatingModifier : nil
             self.oneShot = oneShot
             self.interceptFullscreen = interceptFullscreen
             bindings = b
@@ -88,7 +97,7 @@ final class EventTap {
     func start() -> Bool {
         var mask: CGEventMask = 0
         for t in [CGEventType.keyDown, .keyUp, .leftMouseDown, .leftMouseUp, .leftMouseDragged, .rightMouseDown,
-                  .rightMouseUp, .rightMouseDragged, .mouseMoved] { mask |= 1 << t.rawValue }
+                  .rightMouseUp, .rightMouseDragged, .mouseMoved, .scrollWheel, .flagsChanged] { mask |= 1 << t.rawValue }
         let callback: CGEventTapCallBack = { _, type, event, refcon in
             let me = Unmanaged<EventTap>.fromOpaque(refcon!).takeUnretainedValue()
             return me.handle(type, event)
@@ -115,6 +124,39 @@ final class EventTap {
         let w = cmd.split(separator: " ").map(String.init)
         if w.first == "focus" || w.first == "move" { return w.count == 2 }
         return w.first == "resize"
+    }
+
+    /// Scroll down (or toward you on a trackpad) is the next workspace. A wheel notch is one workspace; continuous
+    /// scrolling must travel a way first, then waits out its momentum, so one flick never skips several.
+    private func scrollCommand(_ event: CGEvent) -> String? {
+        let continuous = event.getIntegerValueField(.scrollWheelEventIsContinuous) != 0
+        let momentum = event.getIntegerValueField(.scrollWheelEventMomentumPhase) != 0
+        let dy = continuous ? event.getDoubleValueField(.scrollWheelEventPointDeltaAxis1)
+                            : Double(event.getIntegerValueField(.scrollWheelEventDeltaAxis1))
+        let now = CACurrentMediaTime()
+        return lock.withLock { () -> String? in
+            var step = 0.0
+            if continuous {
+                if momentum || now - lastScrollSwitch < 0.35 { scrollTravel = 0; return nil }
+                scrollTravel += dy
+                guard abs(scrollTravel) >= 40 else { return nil }
+                step = scrollTravel
+                scrollTravel = 0
+            } else {
+                guard dy != 0, now - lastScrollSwitch > 0.05 else { return nil }
+                step = dy
+            }
+            lastScrollSwitch = now
+            return step < 0 ? "workspace next_on_output" : "workspace prev_on_output"
+        }
+    }
+
+    /// The key pressed in a one-shot mode: leave the mode, then run its command (none: just leave).
+    private func oneShotKey(_ cmd: String?) {
+        lock.withLock { oneShot = false }  // a fast second key goes to the default bindings
+        let run = cmd.map { "mode default; " + $0 } ?? "mode default"
+        let t = CACurrentMediaTime()
+        DispatchQueue.main.async { self.onCommand(run, t) }
     }
 
     private let debug = ProcessInfo.processInfo.environment["PANESPACE_DEBUG"] != nil
@@ -151,22 +193,22 @@ final class EventTap {
             }
             guard type == .keyDown else { break }
             let repeats = event.getIntegerValueField(.keyboardEventAutorepeat) != 0
-            let (mods, capsHeld) = modifiers(event)
+            var (mods, capsHeld) = modifiers(event)
+            lock.withLock { fnUsed = true }  // fn+key: not a tap of fn alone
+            // fn is a modifier only on keys that don't report it by themselves (the arrows always do).
+            if event.flags.contains(.maskSecondaryFn), !Keys.fnByNature.contains(code) { mods.insert(.fn) }
             if mods.contains(.command), code == 0x30 || code == 0x32 { lock.withLock { _lastAppSwitch = Date() } }
             var cmd = lock.withLock { bindings[KeyCombo(keyCode: code, modifiers: mods)] }
             // macOS's own full-screen keys (⌃⌘F, Globe+F) would move the app to a separate Space.
             if cmd == nil, code == 0x03, lock.withLock({ interceptFullscreen }),
-               mods == [.control, .command] || (mods.isEmpty && event.flags.contains(.maskSecondaryFn)) {
+               mods == [.control, .command] || mods == [.fn] {
                 cmd = "fullscreen toggle"
             }
             // A one-shot mode (leader key): leave it first, then run the key's command (which may enter
             // another mode, e.g. resize). A key it doesn't bind just leaves it, and never reaches the app.
             if lock.withLock({ oneShot }) {
                 if repeats { return nil }  // holding the leader key must not pick a command by itself
-                lock.withLock { oneShot = false }  // a fast second key goes to the default bindings
-                let run = cmd.map { "mode default; " + $0 } ?? "mode default"
-                let t = CACurrentMediaTime()
-                DispatchQueue.main.async { self.onCommand(run, t) }
+                oneShotKey(cmd)
                 return nil
             }
             if let cmd {
@@ -183,6 +225,7 @@ final class EventTap {
             let count = Int(event.getIntegerValueField(.mouseEventClickState))
             let p0 = event.location
             let startDrag = lock.withLock { () -> Bool in
+                fnUsed = true
                 if button == .left {
                     _mouseDown = true
                     _click = Click(seq: _click.seq + 1, count: count, dragged: false, down: p0)
@@ -246,6 +289,38 @@ final class EventTap {
                 return nil
             }
             if button == .left { DispatchQueue.main.async { self.onMouseUp() } }
+        case .flagsChanged:
+            let code = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
+            guard code == Keys.fnCode else {
+                lock.withLock { fnUsed = true }  // another modifier joined: fn+shift… isn't a tap
+                break
+            }
+            let now = CACurrentMediaTime()
+            let down = event.flags.contains(.maskSecondaryFn)
+            let others = !event.flags.intersection([.maskShift, .maskControl, .maskAlternate, .maskCommand]).isEmpty
+            // A tap of fn alone, quick and with nothing else pressed: `bindsym fn …`.
+            let (tapped, cmd, inOneShot) = lock.withLock { () -> (Bool, String?, Bool) in
+                if down {
+                    fnDownAt = now
+                    fnUsed = others
+                    return (false, nil, false)
+                }
+                guard !fnUsed, !others, now - fnDownAt < 0.4 else { return (false, nil, false) }
+                fnUsed = true
+                return (true, bindings[KeyCombo(keyCode: Keys.fnCode, modifiers: [])], oneShot)
+            }
+            guard tapped else { break }
+            if inOneShot { oneShotKey(cmd) } else if let cmd {
+                let t = CACurrentMediaTime()
+                DispatchQueue.main.async { self.onCommand(cmd, t) }
+            }
+        case .scrollWheel:
+            guard let sm = lock.withLock({ scrollModifier }), modifiers(event).0.isSuperset(of: sm) else { break }
+            if let cmd = scrollCommand(event) {
+                let t = CACurrentMediaTime()
+                DispatchQueue.main.async { self.onCommand(cmd, t) }
+            }
+            return nil  // the app under the mouse doesn't scroll while the modifier is held
         case .mouseMoved:
             // Panespace's own cursor refresh after a layout change: not the user pointing at something.
             if event.getIntegerValueField(.eventSourceUserData) == EventTap.cursorRefreshTag { break }

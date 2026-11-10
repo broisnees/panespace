@@ -23,13 +23,19 @@ public struct Config {
     public var gaps = Gaps()
     public var smartGaps = false
     public var defaultOrientation = DefaultOrientation.auto
+    /// `auto_split yes` (Hyprland's dwindle): a new window splits the focused one along its longer side.
+    public var autoSplit = false
+    /// `workspace_scroll yes`: floating_modifier + scroll wheel goes to the next/previous workspace on the display.
+    public var workspaceScroll = true
+    /// `which_key yes`: while a mode (the leader, resize) is on, a panel lists its keys.
+    public var whichKey = true
     public var workspaceLayout: Layout?
     public var autoBackAndForth = false
     public var focusFollowsMouse = false
     /// i3's `focus_on_window_activation`: what happens when an app brings up a window on a workspace you can't
     /// see (a notification click, Spotlight, an app opening a link). `focus` goes there (default); `none` and
     /// `urgent` stay put. Cmd-Tab always goes there.
-    public var focusOnActivation = "focus"
+    public var focusOnActivation = "urgent"
     public var mouseWarping = true
     /// `key_layout auto` (default): key names follow the current keyboard layout (`Keys.layout`).
     /// `key_layout qwerty`: they always mean the US key positions.
@@ -254,6 +260,9 @@ public struct Config {
             case "smooth_layout": c.smoothLayout = bool(a.first)
             case "animations": c.animations = bool(a.first)
             case "gestures": c.gestures = bool(a.first)
+            case "auto_split": c.autoSplit = bool(a.first) || a.first == "dwindle"
+            case "workspace_scroll": c.workspaceScroll = bool(a.first)
+            case "which_key": c.whichKey = bool(a.first)
             case "gesture_fingers":
                 if let v = a.first.flatMap(Int.init), v == 3 || v == 4 { c.gestureFingers = v } else { warn("expected: gesture_fingers 3|4") }
             case "animation_duration":

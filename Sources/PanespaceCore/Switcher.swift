@@ -10,6 +10,14 @@ public struct SwitcherEntry: Equatable {
     /// nil = in the scratchpad.
     public let workspace: String?
     public let isFloating: Bool
+    /// Minimized, or its app hidden: out of the layout until it's picked.
+    public let isAway: Bool
+
+    public init(id: WindowID, app: String, bundleID: String, pid: pid_t, title: String, workspace: String?,
+                isFloating: Bool, isAway: Bool = false) {
+        (self.id, self.app, self.bundleID, self.pid, self.title) = (id, app, bundleID, pid, title)
+        (self.workspace, self.isFloating, self.isAway) = (workspace, isFloating, isAway)
+    }
 }
 
 extension Model {

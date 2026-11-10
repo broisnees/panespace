@@ -43,6 +43,7 @@ public struct CommandResult {
     public var errors: [String] = []
     public var effects: [Effect] = []
     public var ok: Bool { errors.isEmpty }
+    public init() {}
 }
 
 public final class Model {
@@ -113,6 +114,7 @@ public final class Model {
         if focusedWorkspace == nil || !isVisible(focusedWorkspace) {
             focusedWorkspace = visible[focusedWorkspace?.monitorID ?? mainMonitor.id] ?? visible[mainMonitor.id]
         }
+        carryPinned()
         gc()
     }
 
@@ -229,7 +231,21 @@ public final class Model {
             visible[ws.monitorID] = ws
         }
         focusedWorkspace = ws
+        carryPinned()
         gc()
+    }
+
+    /// Pinned windows go with whatever workspace their display now shows, behind its own windows in focus order.
+    func carryPinned() {
+        for w in windows.values where w.isPinned {
+            guard let src = w.workspace, !isVisible(src), let dst = visible[src.monitorID] else { continue }
+            src.floating.removeAll { $0 === w }
+            src.forget(w)
+            dst.floating.append(w)
+            dst.mru.append(w)
+            w.floatingWorkspace = dst
+            w.floatingFrameDirty = true  // it may have been parked off screen with the old workspace
+        }
     }
 
     /// Workspace names, most recently shown first: what a display falls back to when its workspace leaves.
@@ -282,6 +298,7 @@ public final class Model {
                           near neighbor: WindowID? = nil, before: Bool = false) -> WindowNode {
         if let w = windows[id] { return w }
         let w = WindowNode(id: id, info: info)
+        w.preferredSize = frame?.size
         windows[id] = w
         var ws: Workspace = focusedWorkspace
         // At startup every window joins the workspace shown on its display. A new floating window (a dialog, a
@@ -304,6 +321,9 @@ public final class Model {
             ws.floating.append(w)
         } else if let n = neighbor.flatMap({ windows[$0] }), n.workspace === ws, !n.isFloating {
             ws.attachTiled(w, near: n, before: before)  // back where it was
+        } else if config.autoSplit {
+            _ = placements()  // the focused tile's real shape, even when several windows arrive in one scan
+            ws.attachDwindle(w)
         } else {
             ws.attachTiled(w)
         }
@@ -382,6 +402,7 @@ public final class Model {
     public func syncFloatingFrame(_ id: WindowID, _ f: CGRect) {
         guard let w = windows[id], w.isFloating, !w.floatingFrameDirty else { return }
         w.floatingFrame = f
+        w.preferredSize = f.size
     }
 
     public func clearDirty(_ id: WindowID) { windows[id]?.floatingFrameDirty = false }
@@ -444,6 +465,10 @@ public final class Model {
     /// with a little slack.
     public func userResized(_ id: WindowID, from: CGRect? = nil, to f: CGRect) {
         guard let w = windows[id], !w.isFloating, let ws = w.workspace, ws.fullscreen !== w else { return }
+        if w.isPseudo {  // its edges are its own size, not the split's: it stays centered in the tile
+            w.preferredSize = f.size
+            return
+        }
         let old = from ?? w.rect
         let slack: CGFloat = from == nil ? 2 : 0.5
         let inner = config.gaps.inner
@@ -495,7 +520,7 @@ public final class Model {
             }
         } else {
             src.detachTiled(node)
-            dst.attachTiled(node, near: anchor, before: before)
+            if anchor == nil, config.autoSplit { dst.attachDwindle(node) } else { dst.attachTiled(node, near: anchor, before: before) }
             dst.normalize()
         }
         for w in (moved + rest).reversed() {
@@ -521,6 +546,7 @@ public final class Model {
         }
         ws.forget(w)
         w.isFloating = true
+        w.isPinned = false
         w.floatingWorkspace = nil
         w.isScratchpad = true
         scratchpad.append(w)
