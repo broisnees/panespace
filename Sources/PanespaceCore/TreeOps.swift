@@ -11,6 +11,29 @@ extension Workspace {
         }
     }
 
+    /// Hyprland's dwindle: the new node splits the focused tile in two along its longer side, so windows spiral
+    /// in without a split key. Falls back to `attachTiled` inside tabbed/stacking or before the first layout.
+    func attachDwindle(_ node: Node) {
+        // Halving the focused tile over and over spirals into slivers. When the focused tile is less than half the
+        // largest one, the largest is split instead: the spiral for the first few windows, never a sliver.
+        func area(_ n: Node) -> CGFloat { n.rect.width * n.rect.height }
+        let focused = selected ?? mostRecentTiled
+        let largest = root.windows.max { area($0) < area($1) }
+        let pick = focused.map { f in largest.map { area(f) * 2 < area($0) ? $0 : f } ?? f }
+        guard let a = pick, a !== node, let p = a.parent, let i = a.index, p.layout.isSplit,
+              a.rect.width > 0, a.rect.height > 0 else { return attachTiled(node) }
+        let o: Orientation = a.rect.width >= a.rect.height ? .horizontal : .vertical
+        if p.layout.orientation == o || p.children.count == 1 {
+            p.layout = .split(o)
+            p.insert(node, at: i + 1)
+        } else {
+            let c = Container(layout: .split(o))
+            p.replace(a, with: c)
+            c.insert(a, at: 0)
+            c.insert(node, at: 1)
+        }
+    }
+
     func detachTiled(_ node: Node) {
         node.parent?.remove(node)
         normalize()

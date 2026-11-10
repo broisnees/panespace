@@ -95,6 +95,7 @@ final class WindowManager {
     private let border = FocusBorder()
     private let dropPreview = DropPreview()
     private let hintsOverlay = HintsOverlay()
+    private let whichKey = WhichKeyPanel()
     let stats = Stats()
     /// When the command being applied was asked for (key press or CLI), to time it to the first frame.
     private var commandAt: Double?
@@ -125,6 +126,13 @@ final class WindowManager {
     /// Windows that left the layout for a while (minimized, app hidden, briefly unlisted): where they lived,
     /// so they come back to the same workspace instead of the focused one.
     private var parked: [WindowID: (workspace: String, floating: Bool, frame: CGRect?, spot: (neighbor: WindowID, before: Bool)?, until: Date)] = [:]
+    /// Minimized windows and windows of hidden apps: out of the layout, but still listed in the switcher so they
+    /// can be brought back. Picking one restores it (`focusWhenBack`) to where it was.
+    private var away: [WindowID: (info: WindowInfo, el: AXUIElement, pid: pid_t, workspace: String, since: Date)] = [:]
+    /// Apps whose focus-change notification is waiting out its burst.
+    private var focusChangePending = Set<pid_t>()
+    /// A window the switcher asked back from minimized/hidden: focused as soon as it's in the layout again.
+    private var focusWhenBack: (id: WindowID, until: Date)?
     /// New windows already seen listed-but-not-shown once (re-checked once, not on every sweep).
     private var offscreenSeen = Set<WindowID>()
     /// When a window last left the screen (closed, minimized, app hidden or quit). macOS then hands focus to
@@ -181,6 +189,9 @@ final class WindowManager {
     private var spaceSettleUntil = Date.distantPast
     /// The layout being applied comes from the user's own command (not an app or macOS event).
     private var userAsked = false
+    /// The keyboard is on a window Panespace doesn't manage (picture-in-picture, an overlay, the desktop), so
+    /// `lastFocused` no longer says where it is. The next command focuses the model's window again.
+    private var focusOutside = false
     private var modDrag: ModDrag?
     /// Bumped on every mod-drag begin and end, so a hit test that lands after its drag ended is dropped.
     private var modDragGeneration = 0
@@ -195,6 +206,8 @@ final class WindowManager {
     private var syncScope: SyncScope?
     private var syncInFlight = false
     private var startup = true
+    /// The user gave a command before the first scan finished: the saved session's focus must not override it.
+    private var commandedDuringStartup = false
     private var capsActive = false
     private var lastMouseMove = Date.distantPast
     private var secureInput = false
@@ -513,9 +526,17 @@ final class WindowManager {
         tap.setBindings(model.config.modes[model.mode] ?? [:], trackMouseMoves: model.config.focusFollowsMouse,
                         floatingModifier: model.config.floatingModifier, capsLock: caps,
                         interceptFullscreen: model.config.interceptNativeFullscreen,
-                        oneShot: model.config.oneShotModes.contains(model.mode))
+                        oneShot: model.config.oneShotModes.contains(model.mode),
+                        scrollWorkspaces: model.config.workspaceScroll)
         updateTrackpad()
         updateStatus()
+        let m = model.focusedMonitor.id
+        let screen = NSScreen.screens.first {
+            ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == m
+        } ?? NSScreen.main
+        let on = model.mode != "default" && model.config.whichKey
+        whichKey.update(mode: on ? model.mode : nil,
+                        groups: on ? WhichKey.groups(model.config.modes[model.mode] ?? [:]) : [], on: screen)
     }
 
     // MARK: Commands
@@ -524,10 +545,26 @@ final class WindowManager {
     @discardableResult
     func runCommand(_ text: String, keyAt: Double? = nil) -> CommandResult {
         stats.command()
+        if startup { commandedDuringStartup = true }
         commandAt = keyAt ?? CACurrentMediaTime()
         defer { commandAt = nil }
         userAsked = true  // a key, the menu or the CLI: allowed to take the user out of a full-screen Space
         defer { userAsked = false }
+        if focusOutside {
+            // e.g. a click on a PiP window, then alt+N for the workspace already shown: bring the keyboard back.
+            focusOutside = false
+            lastFocused = nil
+            pendingFocus = nil
+            focusHolder.release()
+        }
+        // `[criteria] focus` on a window that's minimized (or its app hidden): bring it back.
+        if let parsed = try? CommandParser.parse(text), parsed.count == 1, parsed[0].command == .focusTarget,
+           let c = parsed[0].criteria, let crit = try? Criteria.parse(c),
+           !model.windows.values.contains(where: crit.matches),
+           let (id, a) = away.first(where: { crit.matches(WindowNode(id: $0.key, info: $0.value.info)) }) {
+            bringBack(id, a.el, pid: a.pid)
+            return CommandResult()
+        }
         let modeBefore = model.mode
         let r = timed("model.run '\(text)'") { model.run(text) }
         perform(r.effects)
@@ -579,15 +616,31 @@ final class WindowManager {
             ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == m.id
         } ?? NSScreen.main ?? NSScreen.screens.first
         guard let screen else { return }  // no display at all (mid-wake)
-        switcher.show(model.switcherEntries(), on: screen.visibleFrame) { [weak self] id in
+        let aside = away.sorted { $0.key < $1.key }.map { id, a in
+            SwitcherEntry(id: id, app: a.info.app, bundleID: a.info.bundleID, pid: a.pid, title: a.info.title,
+                          workspace: a.workspace, isFloating: false, isAway: true)
+        }
+        switcher.show(model.switcherEntries() + aside, on: screen.visibleFrame) { [weak self] id in
             guard let self else { return }
             userAsked = true
             defer { userAsked = false }
+            if let id, let a = away[id] { return bringBack(id, a.el, pid: a.pid) }
             if let id, model.windows[id] != nil { model.osFocused(id) }
             lastFocused = nil  // the switcher had the keyboard: always focus again
             pendingFocus = nil
             apply()
         }
+    }
+
+    /// Un-minimizes (or unhides the app of) a window picked in the switcher. The next scan puts it back where it
+    /// was and focuses it.
+    private func bringBack(_ id: WindowID, _ el: AXUIElement, pid: pid_t) {
+        focusWhenBack = (id, Date().addingTimeInterval(3))
+        axQueue.async {
+            if let app = NSRunningApplication(processIdentifier: pid), app.isHidden { app.unhide() }
+            el.set(kAXMinimizedAttribute, false)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { self.requestSync(.apps([pid])) }
     }
 
     /// Window hints over every visible window. Picking one focuses it (or swaps it with the focused one); either
@@ -668,8 +721,15 @@ final class WindowManager {
                 }
             }
         case kAXFocusedWindowChangedNotification:
-            refreshOSFocus()
-            requestSync(.apps([pid]))
+            // Some apps send these in bursts (a web app retitling its tab, a chat app's notifications): one look
+            // and one scan per burst, not one per notification.
+            guard focusChangePending.insert(pid).inserted else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+                guard let self else { return }
+                focusChangePending.remove(pid)
+                refreshOSFocus()
+                requestSync(.apps([pid]))
+            }
         case kAXUIElementDestroyedNotification:
             // Closed: give its space back right away instead of waiting for a rescan.
             if let id = elements.first(where: { CFEqual($0.value, el) })?.key {
@@ -682,6 +742,11 @@ final class WindowManager {
             if n == kAXWindowCreatedNotification, tap.isMouseDown, tap.click.dragged { tearOff = pid }
             if n == kAXWindowMiniaturizedNotification || n == kAXApplicationHiddenNotification { windowLostAt = Date() }
             requestSync(.apps([pid]))
+            // The notification can come before the window reports itself minimized (or shown again): look once
+            // more after the Dock animation, or it would stay in (or out of) the layout until the next sweep.
+            if n == kAXWindowMiniaturizedNotification || n == kAXWindowDeminiaturizedNotification {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { [weak self] in self?.requestSync(.apps([pid])) }
+            }
         }
     }
 
@@ -823,9 +888,16 @@ final class WindowManager {
                 }
                 // Still none: the app is in front with no window of its own focused. If none of its windows
                 // is on screen, go to where they are, like Cmd-Tab to an app on another macOS Space.
-                guard NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
-                      Date().timeIntervalSince(self.windowLostAt) > 0.8 else { return }
+                guard NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else { return }
+                self.focusOutside = true
+                guard Date().timeIntervalSince(self.windowLostAt) > 0.8 else { return }
                 let mine = self.model.windows.values.filter { $0.info.pid == pid }
+                // Every window of it minimized, and the user switched to it (Cmd-Tab, a click on its Dock icon):
+                // bring back the one minimized last, like opening it from the Dock.
+                let asked = Date().timeIntervalSince(self.tap.lastAppSwitch) < 1.5 || Date().timeIntervalSince(self.tap.click.upAt) < 1
+                if mine.isEmpty, asked, let (id, a) = self.away.filter({ $0.value.pid == pid }).max(by: { $0.value.since < $1.value.since }) {
+                    return self.bringBack(id, a.el, pid: pid)
+                }
                 guard !mine.contains(where: { $0.workspace.map(self.model.isVisible) ?? false }),
                       let target = mine.min(by: { $0.id < $1.id }) else { return }
                 self.osFocusReported(target.id, recheck: true)
@@ -838,20 +910,25 @@ final class WindowManager {
             // We just asked for a different window; ignore stale reports until it lands.
             if p.id == id || Date() > p.until { pendingFocus = nil } else { return }
         }
-        guard let w = model.windows[id] else { return }
+        guard let w = model.windows[id] else { focusOutside = true; return }
+        if debug { log("focus: os reports \(id) \(w.info.app) '\(w.info.title)' on \(w.workspace?.name ?? "-") (model has \(model.focusedWindow?.id ?? 0), last \(lastFocused ?? 0))") }
+        focusOutside = false
         // Focus jumped to a window on a workspace that isn't shown. Right after a window closed, minimized or
         // its app hid, that's macOS picking a stand-in (often the same app's window elsewhere): stay put.
         // (Scratchpad windows count as not shown: macOS picking one after a close must not pop it out.)
         if id != model.focusedWindow?.id, !(w.workspace.map(model.isVisible) ?? false) {
             if Date().timeIntervalSince(windowLostAt) < 0.8 { return keepFocus() }
-            // An app brought itself forward (notification click, Spotlight, a link) rather than the user
-            // Cmd-Tabbing to it: with focus_on_window_activation none/urgent, stay on this workspace.
-            if model.config.focusOnActivation != "focus", Date().timeIntervalSince(tap.lastAppSwitch) > 1.5 {
+            // An app brought itself forward (a dev server reloading it, a link opening, a background app) rather
+            // than the user asking (Cmd-Tab, a click on its Dock icon or a notification): with
+            // focus_on_window_activation smart (default), stay on this workspace.
+            let asked = Date().timeIntervalSince(tap.lastAppSwitch) < 1.5 || Date().timeIntervalSince(tap.click.upAt) < 1
+            if model.config.focusOnActivation != "focus", !asked {
                 if debug { log("focus: \(w.info.app) activated on workspace \(w.workspace?.name ?? "scratchpad"); staying (focus_on_window_activation)") }
                 return keepFocus()
             }
-            // Same app as the focused window: the close that caused it may not have been reported yet.
-            if !recheck, let cur = model.focusedWindow, pids[cur.id] == pids[id] {
+            // Not the user switching apps (no Cmd-Tab just now): most likely macOS picking a stand-in after a
+            // minimize or close it hasn't reported yet. Look again once that's been seen, before leaving the workspace.
+            if !recheck, model.focusedWindow != nil, Date().timeIntervalSince(tap.lastAppSwitch) > 1.5 {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { self.refreshOSFocus(recheck: true) }
                 return
             }
@@ -1001,7 +1078,7 @@ final class WindowManager {
         let target = hit.flatMap { model.windows[$0.id] != nil ? $0 : nil } ?? model.window(at: p).map { (id: $0.id, frame: nil) }
         if debug { log("modDrag begin at \(p) resize=\(resize) → \(target.map { "\($0.id)" } ?? "no window")") }
         guard let (id, axFrame) = target, let w = model.windows[id], let el = elements[id],
-              let frame = w.isFloating ? axFrame ?? w.floatingFrame : w.rect else { return }
+              let frame = w.isFloating ? axFrame ?? w.floatingFrame : lastApplied[id] ?? w.rect else { return }
         if id != model.focusedWindow?.id {
             model.osFocused(id)
             apply(warp: false)
@@ -1116,6 +1193,8 @@ final class WindowManager {
     private struct SyncResult {
         var seen: [WindowID: Seen] = [:]
         var minimized = Set<WindowID>()
+        /// Minimized windows not seen before (minimized before Panespace started): listed in the switcher.
+        var minimizedNew: [WindowID: (el: AXUIElement, info: WindowInfo)] = [:]
         var hiddenPids = Set<pid_t>()
         var failedPids = Set<pid_t>()  // app didn't answer: keep its windows as they are
         var goneApps = Set<pid_t>()
@@ -1178,6 +1257,7 @@ final class WindowManager {
         }
         let existing = trackers
         let known = model.windows.mapValues(\.isFloating)
+        let knownAway = Set(away.keys)
         // In a full-screen Space (or sliding to one) every desktop window is off screen: that says nothing.
         let offscreenMeansHidden = !spaces.activeIsFullscreen && Date() >= spaceSettleUntil
         let refcon = refcon
@@ -1205,11 +1285,20 @@ final class WindowManager {
                 let bundle = app.bundleIdentifier ?? ""
                 var local: [WindowID: Seen] = [:]
                 var localMinimized: [WindowID] = []
+                var localMinimizedNew: [WindowID: (el: AXUIElement, info: WindowInfo)] = [:]
                 var listed: [(el: AXUIElement, id: WindowID)] = []
                 for w in windows {
                     guard let id = w.windowID, server.isEmpty || server[id] != nil else { continue }
-                    if w.isMinimized || w.isFullScreen {  // full screen: on its own Space, outside the layout
+                    // Some apps restore their windows (after a reboot, say) still flagged minimized while plainly on
+                    // screen: the window server has the last word, or they'd sit untiled over everything.
+                    // Only for windows not yet in the layout: one being minimized is still on screen for the length
+                    // of the animation, and must leave the layout right away.
+                    let minimized = w.isMinimized && (known[id] != nil || server[id]?.onscreen != true)
+                    if minimized || w.isFullScreen {  // full screen: on its own Space, outside the layout
                         localMinimized.append(id)
+                        if minimized, known[id] == nil, !knownAway.contains(id) {
+                            localMinimizedNew[id] = (w, WindowInfo(app: name, bundleID: bundle, title: w.title, pid: pid))
+                        }
                         continue
                     }
                     listed.append((w, id))
@@ -1248,6 +1337,7 @@ final class WindowManager {
                 lock.withLock {
                     result.seen.merge(local) { a, _ in a }
                     result.minimized.formUnion(localMinimized)
+                    result.minimizedNew.merge(localMinimizedNew) { a, _ in a }
                     result.tabs.merge(localTabs) { a, _ in a }
                     for id in localOffscreen { result.offscreen[id] = pid }
                     if existing[pid] == nil { result.newTrackers[pid] = t }
@@ -1269,6 +1359,9 @@ final class WindowManager {
     private func finishSync(_ scope: SyncScope, _ r: SyncResult) {
         syncInFlight = false
         let seen = r.seen
+        for (id, m) in r.minimizedNew where away[id] == nil && model.windows[id] == nil {
+            away[id] = (m.info, m.el, m.info.pid, model.focusedWorkspace.name, .distantPast)
+        }
         for (pid, t) in r.newTrackers where trackers[pid] == nil { trackers[pid] = t }
         for id in seen.keys { missing[id] = nil }
         // The user picked another native tab: the newly selected one takes the old one's tile.
@@ -1300,6 +1393,9 @@ final class WindowManager {
                 if r.server?[id] != nil { park(id) }
                 forget(id)
             } else if r.minimized.contains(id) || r.hiddenPids.contains(pid) {
+                if let w = model.windows[id], let el = elements[id] {
+                    away[id] = (w.info, el, pid, w.workspace?.name ?? model.focusedWorkspace.name, Date())
+                }
                 park(id)
                 forget(id)
             } else {
@@ -1311,7 +1407,10 @@ final class WindowManager {
                 }
             }
         }
-        if let s = r.server { for id in parked.keys where s[id] == nil { parked[id] = nil } }
+        if let s = r.server {
+            for id in parked.keys where s[id] == nil { parked[id] = nil }
+            for id in away.keys where s[id] == nil { away[id] = nil }  // closed while minimized
+        }
 
         // Restored windows keep their saved order; new ones follow by ID.
         var saved: [WindowID: (Int, Session.Entry)] = [:]
@@ -1333,10 +1432,18 @@ final class WindowManager {
                 if fullscreenSkipped.insert(id).inserted { log("full screen: leaving \(info.app)'s full-screen window alone") }
                 continue
             }
+            away[id] = nil
             if let p = parked.removeValue(forKey: id), Date() < p.until {
                 model.addWindow(id, info: info, floating: p.floating, frame: nil, workspaceName: p.workspace,
                                 near: p.spot?.neighbor, before: p.spot?.before ?? false)
                 if let f = p.frame { model.restoreFloatingFrame(id, f) }
+                if let fw = focusWhenBack, fw.id == id {
+                    focusWhenBack = nil
+                    if Date() < fw.until {
+                        model.osFocused(id)
+                        lastFocused = nil
+                    }
+                }
                 markRulesRun(id)  // back from minimized or hidden: its rules ran when it first appeared
                 continue
             }
@@ -1362,14 +1469,18 @@ final class WindowManager {
         if startup, case .all = scope {
             startup = false
             lastFocused = nil
-            if let s = restoring { model.restoreFocus(workspace: s.focused) }
+            if let s = restoring, !commandedDuringStartup { model.restoreFocus(workspace: s.focused) }
             restoring = nil
         }
         for id in added { runRules(id) }
         // A new floating window doesn't take the keyboard by itself: an autocomplete list or a tool panel
         // would steal it from the editor. If macOS really focused it, refreshOSFocus (below) follows.
+        // A dialog from another app (System Settings, a permission prompt, a background app asking something) is
+        // different: it's what the user has to answer, and macOS may have opened it under the active app's
+        // windows. It takes the focus, which brings it to the front.
         if !added.isEmpty, let before = focusBefore, model.windows[before] != nil,
-           let now = model.focusedWindow, added.contains(now.id), now.isFloating {
+           let now = model.focusedWindow, added.contains(now.id), now.isFloating, pids[now.id] == pids[before] {
+            if debug { log("focus: new floating \(now.id) doesn't take focus; back to \(before) (front pid \(NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0), its pid \(pids[now.id] ?? 0))") }
             model.osFocused(before)
         }
         for id in fullscreenOnReturn where model.windows[id] != nil {
@@ -1573,6 +1684,8 @@ final class WindowManager {
                 lastFocusedOn = on
                 pendingFocus = (f.id, Date().addingTimeInterval(0.6))
                 focusJob = (pid, f.id, el, focusGeneration.increment())
+                if debug { log("focus: job → \(f.id) \(f.info.app) '\(f.info.title)'") }
+                focusOutside = false
             }
         } else if lastFocused != nil || focusHolder.monitor != model.focusedMonitor.id,
                   userAsked || !Spaces.summary().activeIsFullscreen {
@@ -1581,6 +1694,7 @@ final class WindowManager {
             lastFocused = nil
             _ = focusGeneration.increment()
             focusHolder.take(model.focusedMonitor.id)
+            focusOutside = false
         }
 
         if restart || focusJob != nil {
@@ -1733,7 +1847,7 @@ final class WindowManager {
         var homes: [WindowID: CGRect] = [:]
         var followers: [Animator.Follower] = []
         if live {
-            for w in ws.allWindows {
+            for w in ws.allWindows where !w.isPinned {  // a pinned window stays put while the workspaces slide
                 guard let el = elements[w.id], let pid = pids[w.id],
                       let base = w.isFloating ? w.floatingFrame : (lastApplied[w.id] ?? w.rect) else { continue }
                 followers.append(.init(id: w.id, el: el, pid: pid, base: base, resize: false))

@@ -58,11 +58,23 @@ enum LayoutEngine {
         return out
     }
 
+    /// A pseudotiled window's frame: its preferred size (never past the tile, never under its minimum), centered.
+    /// The size is settled when pseudo is turned on (`Model.pseudoSize`), so it never jumps between layouts.
+    static func pseudoFrame(_ w: WindowNode, in r: CGRect) -> CGRect {
+        var s = w.preferredSize ?? CGSize(width: r.width * 2 / 3, height: r.height * 2 / 3)
+        // Never below what the app accepts, even if that spills past the tile: squeezing it further makes the
+        // app push back every time, and the window flickers between the two sizes.
+        s.width = max(min(s.width, r.width), w.minSize.width)
+        s.height = max(min(s.height, r.height), w.minSize.height)
+        return CGRect(x: (r.midX - s.width / 2).rounded(), y: (r.midY - s.height / 2).rounded(),
+                      width: s.width.rounded(), height: s.height.rounded())
+    }
+
     private static func place(_ n: Node, _ r: CGRect, ws: Workspace, inner: CGFloat, padding: CGFloat,
                               into out: inout [WindowID: CGRect]) {
         n.rect = r
         if let w = n as? WindowNode {
-            out[w.id] = r
+            out[w.id] = w.isPseudo ? pseudoFrame(w, in: r) : r
             return
         }
         guard let c = n as? Container, !c.children.isEmpty else { return }

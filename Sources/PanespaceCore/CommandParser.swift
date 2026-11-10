@@ -21,7 +21,12 @@ public enum LayoutArg: Equatable {
     case cycle([Layout?])
 }
 
-public enum ResizeDimension: Equatable { case width, height, edge(Direction) }
+public enum ResizeDimension: Equatable {
+    case width, height, edge(Direction)
+    /// panespace: `resize left|right|up|down` moves the focused window's border that way, whichever side of the
+    /// window it is on: `left` always moves a border left (the arrow keys mean what they show).
+    case border(Direction)
+}
 
 public struct ResizeArg: Equatable {
     public var grow: Bool
@@ -57,6 +62,10 @@ public enum Command: Equatable {
     /// Panespace zoom: the window fills its workspace and stays in the layout.
     case zoom(Toggle)
     case floating(Toggle)
+    /// Hyprland's pseudotile: the window keeps its own size, centered in its tile.
+    case pseudo(Toggle)
+    /// Hyprland's pin: a floating window that stays on screen on every workspace of its display.
+    case pin(Toggle)
     case resize(ResizeArg)
     case balance
     /// panespace: auto-hide the macOS menu bar and Dock so tiles use the whole screen (Omarchy-style).
@@ -283,21 +292,25 @@ public enum CommandParser {
         case "floating":
             guard let x = arg(0) else { throw ParseError("floating needs enable, disable or toggle") }
             return .floating(try toggle(x))
+        case "pseudo", "pseudotile": return .pseudo(try toggle(arg(0) ?? "toggle"))
+        case "pin", "sticky": return .pin(try toggle(arg(0) ?? "toggle"))
 
         case "resize":
-            guard let kind = arg(0), kind == "grow" || kind == "shrink" else {
-                throw ParseError("resize supports 'grow' and 'shrink'")
+            let border = arg(0).flatMap(Direction.init(rawValue:))
+            guard let kind = arg(0), kind == "grow" || kind == "shrink" || border != nil else {
+                throw ParseError("resize supports 'grow', 'shrink' and 'left|right|up|down'")
             }
             let dim: ResizeDimension
-            switch arg(1) {
+            switch border == nil ? arg(1) : "border" {
+            case "border": dim = .border(border!)
             case "width": dim = .width
             case "height": dim = .height
             case let s?: guard let d = Direction(rawValue: s) else { throw ParseError("bad resize direction '\(s)'") }
                 dim = .edge(d)
             case nil: throw ParseError("resize needs width/height/direction")
             }
-            var r = ResizeArg(grow: kind == "grow", dimension: dim)
-            var j = 2
+            var r = ResizeArg(grow: kind != "shrink", dimension: dim)
+            var j = border == nil ? 2 : 1
             while j < lower.count {
                 if let n = Int(lower[j]) {
                     if arg(j + 1) == "ppt" { r.ppt = n; j += 1 } else { r.px = n; if arg(j + 1) == "px" { j += 1 } }

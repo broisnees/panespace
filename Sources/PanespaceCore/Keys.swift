@@ -7,6 +7,8 @@ public struct Modifiers: OptionSet, Hashable {
     public static let command = Modifiers(rawValue: 8)
     /// Caps Lock used as a modifier (panespace remaps it to F18 and tracks it).
     public static let caps = Modifiers(rawValue: 16)
+    /// The fn / Globe key held with another key (`fn+tab`). Alone, `fn` is a key of its own: a tap binds it.
+    public static let fn = Modifiers(rawValue: 32)
 
     /// i3 and macOS spellings. Mod1 = alt, Mod4 = super = cmd, as on X11.
     static func named(_ s: String) -> Modifiers? {
@@ -16,6 +18,7 @@ public struct Modifiers: OptionSet, Hashable {
         case "alt", "opt", "option", "mod1": return .option
         case "cmd", "command", "super", "mod4": return .command
         case "caps", "capslock", "caps_lock": return .caps
+        case "fn", "globe": return .fn
         case "hyper": return [.shift, .control, .option, .command]
         case "meh": return [.shift, .control, .option]
         default: return nil
@@ -50,6 +53,7 @@ public struct KeyCombo: Hashable, CustomStringConvertible {
 
     public var description: String {
         var s = ""
+        if modifiers.contains(.fn) { s += "fn+" }
         if modifiers.contains(.caps) { s += "caps+" }
         if modifiers.contains(.control) { s += "ctrl+" }
         if modifiers.contains(.option) { s += "alt+" }
@@ -61,6 +65,11 @@ public struct KeyCombo: Hashable, CustomStringConvertible {
 
 /// X11 keysym names → macOS virtual key codes (ANSI positions).
 public enum Keys {
+    /// The fn/Globe key's code: `bindsym fn …` fires on a tap of fn alone.
+    public static let fnCode: UInt16 = 0x3F
+    /// Keys that report the fn flag by themselves (arrows, F-keys, Home/End…): fn isn't a modifier on them.
+    public static let fnByNature: Set<UInt16> = [0x7B, 0x7C, 0x7D, 0x7E, 0x73, 0x77, 0x74, 0x79, 0x75, 0x72,
+        0x7A, 0x78, 0x63, 0x76, 0x60, 0x61, 0x62, 0x64, 0x65, 0x6D, 0x67, 0x6F, 0x69, 0x6B, 0x71, 0x6A, 0x40, 0x4F, 0x50, 0x5A]
     /// The current keyboard layout's characters → key codes, set by the app (nil = US positions). Key names that
     /// stand for a character ("q", "1", "bracketleft") follow it, so a binding means the key that types it; names
     /// it can't type (a Devanagari or Cyrillic layout) keep their US position.
@@ -85,7 +94,7 @@ public enum Keys {
             "u": 0x20, "bracketleft": 0x21, "i": 0x22, "p": 0x23, "return": 0x24, "l": 0x25, "j": 0x26,
             "apostrophe": 0x27, "k": 0x28, "semicolon": 0x29, "backslash": 0x2A, "comma": 0x2B,
             "slash": 0x2C, "n": 0x2D, "m": 0x2E, "period": 0x2F, "tab": 0x30, "space": 0x31, "grave": 0x32,
-            "backspace": 0x33, "escape": 0x35, "section": 0x0A,
+            "backspace": 0x33, "escape": 0x35, "section": 0x0A, "fn": 0x3F,
             "left": 0x7B, "right": 0x7C, "down": 0x7D, "up": 0x7E,
             "home": 0x73, "end": 0x77, "prior": 0x74, "next": 0x79, "delete": 0x75, "help": 0x72,
             "f1": 0x7A, "f2": 0x78, "f3": 0x63, "f4": 0x76, "f5": 0x60, "f6": 0x61, "f7": 0x62, "f8": 0x64,
@@ -102,7 +111,7 @@ public enum Keys {
             "dash": "minus", "quote": "apostrophe", "leftbracket": "bracketleft",
             "rightbracket": "bracketright", "backtick": "grave",
             "[": "bracketleft", "]": "bracketright", ";": "semicolon", "'": "apostrophe", ",": "comma",
-            ".": "period", "/": "slash", "\\": "backslash", "`": "grave", "-": "minus", "=": "equal",
+            ".": "period", "/": "slash", "\\": "backslash", "`": "grave", "-": "minus", "=": "equal", "globe": "fn",
         ]
         for (a, b) in aliases { t[a] = t[b] }
         return t

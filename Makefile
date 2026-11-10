@@ -2,16 +2,24 @@ APPS_DIR  ?= $(HOME)/Applications
 BIN_DIR   ?= $(HOME)/.local/bin
 AGENTS    := $(HOME)/Library/LaunchAgents
 # A stable signing identity keeps the Accessibility grant across rebuilds; ad-hoc ("-") re-prompts each time.
-SIGN_ID   ?= $(shell security find-identity -v -p codesigning 2>/dev/null | awk -F'"' '/Apple Development|Developer ID/ {print $$2; exit}')
+SIGN_ID   ?= $(shell security find-identity -v -p codesigning 2>/dev/null | awk -F'"' '/Apple Development|Developer ID|Panespace Local Signing/ {print $$2; exit}')
 ifeq ($(SIGN_ID),)
 SIGN_ID   := -
 endif
+# ARCHS="arm64 x86_64" builds a universal app (Apple Silicon and Intel); empty = this Mac's architecture only.
+ARCHS     ?=
+ARCH_FLAGS := $(foreach a,$(ARCHS),--arch $(a))
+BIN_PATH   = $(if $(ARCHS),$(shell swift build -c release $(ARCH_FLAGS) --show-bin-path),.build/release)
 VERSION   := $(shell /usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' Resources/Info.plist)
 
-.PHONY: build test icon app dist install uninstall login-item caps-login-item no-login-item clean
+.PHONY: build test icon app dist install uninstall login-item caps-login-item no-login-item clean cert
 
 build:
-	swift build -c release
+	swift build -c release $(ARCH_FLAGS)
+
+# Once per Mac: a local signing identity, so rebuilds keep the Accessibility grant (scripts/make-cert.sh).
+cert:
+	scripts/make-cert.sh
 
 test:
 	swift test
@@ -32,11 +40,11 @@ icon:
 	iconutil -c icns .build/AppIcon.iconset -o Resources/AppIcon.icns
 	sips -z 512 512 .build/AppIcon.png --out Resources/AppIcon.png >/dev/null
 
-# $(call bundle,Name,executable,plist[,icon]): build Name.app around .build/release/executable and sign it.
+# $(call bundle,Name,executable,plist[,icon]): build Name.app around the built executable and sign it.
 define bundle
 	rm -rf $(1).app
 	mkdir -p $(1).app/Contents/MacOS $(1).app/Contents/Resources
-	cp .build/release/$(2) $(1).app/Contents/MacOS/$(2)
+	cp $(BIN_PATH)/$(2) $(1).app/Contents/MacOS/$(2)
 	cp Resources/$(3) $(1).app/Contents/Info.plist
 	$(if $(4),cp Resources/$(4) $(1).app/Contents/Resources/)
 	codesign --force --sign "$(SIGN_ID)" --identifier app.panespace.$(1) $(1).app
@@ -66,7 +74,8 @@ app: build
 	@echo "built Panespace.app and Caps.app (signed: $(SIGN_ID))"
 
 # Zipped bundles for a GitHub release: dist/Panespace-$(VERSION).zip, dist/Caps-$(VERSION).zip.
-dist: app
+dist:
+	$(MAKE) app ARCHS="arm64 x86_64"
 	rm -rf dist && mkdir dist
 	ditto -c -k --keepParent Panespace.app dist/Panespace-$(VERSION).zip
 	ditto -c -k --keepParent Caps.app dist/Caps-$(VERSION).zip
@@ -74,10 +83,14 @@ dist: app
 
 install: app
 	mkdir -p $(APPS_DIR) $(BIN_DIR)
+	@# Replacing a running binary gets it killed for an invalid signature, and launchd then holds the restart
+	@# back: stop it first, start it again after.
+	@launchctl kill TERM gui/$$(id -u)/app.panespace.Panespace 2>/dev/null; pkill -x panespace 2>/dev/null; sleep 0.3; true
 	rm -rf $(APPS_DIR)/Panespace.app $(APPS_DIR)/Caps.app
 	cp -R Panespace.app Caps.app $(APPS_DIR)/
 	ln -sf $(APPS_DIR)/Panespace.app/Contents/MacOS/panespace $(BIN_DIR)/panespace
 	ln -sf $(APPS_DIR)/Caps.app/Contents/MacOS/caps $(BIN_DIR)/caps
+	@launchctl kickstart -k gui/$$(id -u)/app.panespace.Panespace 2>/dev/null || true
 	@echo "installed $(APPS_DIR)/Panespace.app and $(APPS_DIR)/Caps.app; CLIs in $(BIN_DIR)"
 	@echo "start: open $(APPS_DIR)/Panespace.app $(APPS_DIR)/Caps.app   (grant Accessibility to each when asked)"
 
@@ -99,3 +112,12 @@ uninstall: no-login-item
 
 clean:
 	rm -rf .build dist Panespace.app Caps.app
+
+# End-to-end: drives the running daemon with real test windows on a workspace of its own ("e2e") and checks the
+# screen against the model. Takes about a minute; don't use the Mac meanwhile.
+e2e:
+	mkdir -p .build/e2e
+	swiftc -O scripts/e2e/testwin.swift -o .build/e2e/testwin
+	swiftc -O scripts/e2e/zorder.swift -o .build/e2e/zorder
+	cp scripts/e2e/e2e.py .build/e2e/ && python3 -I .build/e2e/e2e.py
+.PHONY: e2e

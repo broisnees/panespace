@@ -135,6 +135,12 @@ public final class WindowNode: Node {
     public internal(set) var isScratchpad = false
     /// Smallest size the app was seen to accept; tiling gives it at least this much when there's room.
     public internal(set) var minSize: CGSize = .zero
+    /// Pseudotiled: keeps its own size (`preferredSize`), centered in its tile, instead of filling it.
+    public internal(set) var isPseudo = false
+    /// The size the window wants when pseudotiled: its size when first seen or last floating.
+    public internal(set) var preferredSize: CGSize?
+    /// Pinned: a floating window that stays on screen whichever workspace its display shows.
+    public internal(set) var isPinned = false
     weak var floatingWorkspace: Workspace?
 
     public init(id: WindowID, info: WindowInfo) {

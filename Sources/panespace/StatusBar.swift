@@ -482,6 +482,35 @@ enum WorkspaceIcon {
         }
     }
 
+    // MARK: Binding mode tag
+
+
+    /// A small outlined keycap with the mode's glyph (a keyboard for the leader, arrows for resize): enough to say
+    /// "keys are live"; the which-key panel says the rest.
+    private static func modeIcon(_ mode: String) -> NSImage? {
+        let name: String
+        switch mode.lowercased() {
+        case "resize": name = "arrow.up.left.and.arrow.down.right"
+        case "move": name = "arrow.up.and.down.and.arrow.left.and.right"
+        default: name = "keyboard"
+        }
+        return NSImage(systemSymbolName: name, accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: 9.5, weight: .semibold))
+    }
+
+    static func modeWidth(_ mode: String) -> CGFloat { 24 }
+
+    private static func drawMode(_ mode: String, in r: NSRect) {
+        NSColor.black.set()
+        let cap = NSBezierPath(roundedRect: r.insetBy(dx: 0.6, dy: 0.6), xRadius: 4.5, yRadius: 4.5)
+        cap.lineWidth = 1.2
+        cap.stroke()
+        if let i = modeIcon(mode) {
+            i.draw(in: NSRect(x: (r.midX - i.size.width / 2).rounded(), y: (r.midY - i.size.height / 2).rounded(),
+                              width: i.size.width, height: i.size.height))
+        }
+    }
+
     private static func textWidth(_ s: String, _ f: NSFont) -> CGFloat {
         ceil((s as NSString).size(withAttributes: [.font: f]).width)
     }
@@ -490,7 +519,6 @@ enum WorkspaceIcon {
     /// binding-mode pill.
     private static func renderCurrent(_ label: String, _ look: Look, mode: String?, secureInput: Bool, warning: Bool) -> NSImage {
         let h = height
-        let modeFont = font(9.5, .bold)
         let size = badgeSize(label, look, height: 16)
         var x: CGFloat = 0
         var lockRect: NSRect?
@@ -499,11 +527,10 @@ enum WorkspaceIcon {
             x += 19
         }
         var modeRect: NSRect?
-        let modeText = mode?.uppercased()
-        if let modeText {
-            let w = textWidth(modeText, modeFont) + 14
+        if let mode {
+            let w = modeWidth(mode)
             modeRect = NSRect(x: x, y: (h - 16) / 2, width: w, height: 16)
-            x += w + 5
+            x += w + 6
         }
         let symbol = warning ? "exclamationmark.triangle.fill" : "lock.fill"
         let badge = NSRect(x: x, y: (h - size.height) / 2, width: size.width, height: size.height)
@@ -515,10 +542,7 @@ enum WorkspaceIcon {
                 let s = lock.size
                 lock.draw(in: NSRect(x: r.midX - s.width / 2, y: r.midY - s.height / 2, width: s.width, height: s.height))
             }
-            if let r = modeRect, let modeText {
-                NSBezierPath(roundedRect: r, xRadius: r.height / 2, yRadius: r.height / 2).fill()
-                knockOut(modeText, modeFont, in: r, cg)
-            }
+            if let r = modeRect, let mode { drawMode(mode, in: r) }
             drawBadge(label, look, filled: true, in: badge, cg)
             return true
         }
@@ -533,7 +557,6 @@ enum WorkspaceIcon {
         }
         let h = height
         let numberFont = font(12, .semibold)
-        let modeFont = font(9.5, .bold)
 
         // Leading accessories: Secure Input lock, binding mode pill.
         var x: CGFloat = 0
@@ -543,11 +566,10 @@ enum WorkspaceIcon {
             x += 12 + 5
         }
         var modeRect: NSRect?
-        let modeText = mode?.uppercased()
-        if let modeText {
-            let w = textWidth(modeText, modeFont) + 14
+        if let mode {
+            let w = modeWidth(mode)
             modeRect = NSRect(x: x, y: 1, width: w, height: h - 2)
-            x += w + 5
+            x += w + 6
         }
 
         // Workspace segments.
@@ -590,10 +612,7 @@ enum WorkspaceIcon {
                 let s = lock.size
                 lock.draw(in: NSRect(x: r.midX - s.width / 2, y: r.midY - s.height / 2, width: s.width, height: s.height))
             }
-            if let r = modeRect, let modeText {
-                fill(capsule(r), 1)
-                knockOut(modeText, modeFont, in: r, cg)
-            }
+            if let r = modeRect, let mode { drawMode(mode, in: r) }
 
             switch look {
             case .number, .pill, .panes, .circle, .minimal: break

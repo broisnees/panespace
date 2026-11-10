@@ -49,6 +49,111 @@ final class TreeTests: XCTestCase {
         XCTAssertEqual(tree, "H[1 2 4 3]")
     }
 
+    func testAutoSplitDwindles() {
+        var c = Config()
+        c.autoSplit = true
+        m.setConfig(c)
+        add(1, 2)  // 1000×500: side by side
+        XCTAssertEqual(tree, "H[1 2]")
+        add(3)  // 2 is 500×500 (square counts as wide)
+        XCTAssertEqual(tree, "H[1 2 3]")
+        add(4)  // 3 is ~333×500: taller than wide, splits top/bottom
+        XCTAssertEqual(tree, "H[1 2 V[3 4]]")
+        XCTAssertEqual(frame(4), CGRect(x: 666, y: 250, width: 334, height: 250))
+        add(5)  // 4 is 334×250: wide again
+        XCTAssertEqual(tree, "H[1 2 V[3 H[4 5]]]")
+        m.removeWindow(5)
+        XCTAssertEqual(tree, "H[1 2 V[3 4]]")
+    }
+
+    func testPseudoKeepsSizeCentered() {
+        m.addWindow(1, info: WindowInfo(app: "App"), floating: false, frame: CGRect(x: 0, y: 0, width: 300, height: 200))
+        add(2)
+        m.osFocused(1)
+        run("pseudo toggle")
+        XCTAssertEqual(frame(1), CGRect(x: 100, y: 150, width: 300, height: 200))  // tile is 0,0 500×500
+        XCTAssertEqual(m.windows[1]!.rect, CGRect(x: 0, y: 0, width: 500, height: 500))
+        run("focus right")
+        XCTAssertEqual(focused, 2)
+        m.osFocused(1)
+        run("pseudo disable")
+        XCTAssertEqual(frame(1), CGRect(x: 0, y: 0, width: 500, height: 500))
+        run("floating enable; pseudo toggle")  // floating: no effect
+        XCTAssertFalse(m.windows[1]!.isPseudo)
+    }
+
+    func testDirectionalFocusReachesFloatingWindows() {
+        add(1, 2)  // tiles: 1 left, 2 right (500 wide each)
+        m.addWindow(3, info: WindowInfo(app: "Dialog"), floating: true, frame: CGRect(x: 600, y: 150, width: 200, height: 200))
+        m.osFocused(1)
+        run("focus right")
+        XCTAssertEqual(focused, 3)  // the dialog's center (700) is nearer than tile 2's (750)
+        run("focus left")
+        XCTAssertEqual(focused, 1)
+        m.osFocused(2)
+        run("focus left")
+        XCTAssertEqual(focused, 3)  // over tile 2, left of its center: on the way
+        run("focus right")
+        XCTAssertEqual(focused, 2)
+    }
+
+    func testResizeRightOnLeftColumnOfDwindle() {
+        var c = Config()
+        c.autoSplit = true
+        m.setConfig(c)
+        add(1, 2, 3, 4)
+        m.osFocused(1)
+        let before = frame(1)!
+        run("resize right 80 px")
+        XCTAssertEqual(frame(1)!.width, before.width + 80, tree)
+    }
+
+    func testDwindleNeverMakesSlivers() {
+        var c = Config()
+        c.autoSplit = true
+        m.setConfig(c)
+        for id in WindowID(1)...12 { add(id) }
+        let w = m.placements().compactMap { if case .tiled(let r) = $0.value { return r } else { return nil } }
+        XCTAssertGreaterThanOrEqual(w.map { min($0.width, $0.height) }.min()!, 120, tree)
+    }
+
+    func testResizeMovesTheBorderTheWayOfTheArrow() {
+        add(1, 2)  // 500 | 500
+        m.osFocused(1)
+        run("resize right 100 px")
+        XCTAssertEqual(frame(1)?.width, 600)
+        run("resize left 50 px")
+        XCTAssertEqual(frame(1)?.width, 550)
+        m.osFocused(2)  // the right window: its border is on its left, still moves the way of the arrow
+        run("resize left 50 px")
+        XCTAssertEqual(frame(1)?.width, 500)
+        XCTAssertEqual(frame(2)?.width, 500)
+        run("resize right 100 px")
+        XCTAssertEqual(frame(1)?.width, 600)
+    }
+
+    func testPinFollowsWorkspaces() {
+        add(1, 2)
+        run("pin toggle")
+        let w = m.windows[2]!
+        XCTAssertTrue(w.isFloating && w.isPinned)
+        run("workspace 2")
+        XCTAssertTrue(w.workspace === ws)
+        XCTAssertEqual(ws.name, "2")
+        guard case .floating? = m.placements()[2] else { return XCTFail("pinned window hidden") }
+        guard case .hidden? = m.placements()[1] else { return XCTFail("workspace 1 still shown") }
+        run("workspace 1")
+        XCTAssertTrue(w.workspace === ws)
+        XCTAssertNil(m.workspace(named: "2"))  // left empty: dropped
+        m.osFocused(2)
+        run("move container to workspace number 3")
+        XCTAssertFalse(w.isPinned)
+        XCTAssertEqual(w.workspace?.name, "3")
+        m.osFocused(2)
+        run("pin enable; floating disable")
+        XCTAssertFalse(w.isPinned)
+    }
+
     func testNativeTabSwitchKeepsTile() {
         add(1, 2, 3)
         run("focus left")
@@ -93,7 +198,8 @@ final class TreeTests: XCTestCase {
     func testFocusOnActivationParses() {
         XCTAssertEqual(Config.parse("focus_on_window_activation none\n").focusOnActivation, "none")
         XCTAssertEqual(Config.parse("focus_on_window_activation smart\n").focusOnActivation, "urgent")
-        XCTAssertEqual(Config.parse("").focusOnActivation, "focus")
+        XCTAssertEqual(Config.parse("").focusOnActivation, "urgent")  // smart: apps bringing themselves forward don't move you
+        XCTAssertEqual(Config.parse("focus_on_window_activation focus\n").focusOnActivation, "focus")
         XCTAssertFalse(Config.parse("focus_on_window_activation bogus\n").warnings.isEmpty)
     }
 
@@ -1012,5 +1118,32 @@ final class SwipeTests: XCTestCase {
         XCTAssertFalse(c.gestures)
         XCTAssertEqual(c.gestureFingers, 3)
         XCTAssertEqual(Config.parse("gesture_fingers 5").warnings.count, 1)
+    }
+}
+
+final class FnAndWhichKeyTests: XCTestCase {
+    func testFnBindings() {
+        XCTAssertEqual(KeyCombo.parse("fn+tab"), KeyCombo(keyCode: 0x30, modifiers: .fn))
+        XCTAssertEqual(KeyCombo.parse("globe"), KeyCombo(keyCode: Keys.fnCode, modifiers: []))
+        let c = Config.parse("bindsym fn+tab switcher\nbindsym fn mode \"leader\"\nmode --oneshot \"leader\" {\n bindsym q kill\n}")
+        XCTAssertTrue(c.warnings.isEmpty, "\(c.warnings)")
+        XCTAssertEqual(c.modes["default"]?[KeyCombo(keyCode: Keys.fnCode, modifiers: [])], "mode \"leader\"")
+    }
+
+    func testWhichKeyRows() {
+        var b: [KeyCombo: String] = [:]
+        for n in 1...5 { b[KeyCombo.parse("\(n)")!] = "workspace number \(n) output next" }
+        for (k, d) in [("w", "up"), ("a", "left"), ("s", "down"), ("d", "right")] {
+            b[KeyCombo.parse(k)!] = "focus \(d)"
+            b[KeyCombo.parse("Shift+" + k)!] = "move \(d)"
+        }
+        b[KeyCombo.parse("q")!] = "kill"
+        b[KeyCombo.parse("Escape")!] = "mode \"default\""
+        XCTAssertEqual(WhichKey.groups(b), [
+            .init(title: "Move", entries: [.init(key: "W A S D", label: "Focus ↑←↓→"), .init(key: "⇧ W A S D", label: "Move ↑←↓→")]),
+            .init(title: "Window", entries: [.init(key: "Q", label: "Close")]),
+            .init(title: "Workspaces", entries: [.init(key: "1–5", label: "Workspace on other display")]),
+            .init(title: "Tools", entries: [.init(key: "esc", label: "Cancel")]),
+        ])
     }
 }

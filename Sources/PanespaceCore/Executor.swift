@@ -91,6 +91,7 @@ extension Model {
             var dst = resolveWorkspace(t, create: true)
             if dst === ws, config.autoBackAndForth, case .name = t { dst = resolveWorkspace(.backAndForth, create: true) }
             if dst === ws, config.autoBackAndForth, case .number = t { dst = resolveWorkspace(.backAndForth, create: true) }
+            (node as? WindowNode)?.isPinned = false  // sent somewhere on purpose: it stays there
             if let dst { moveNode(node, to: dst) }
 
         case .moveToOutput(let t):
@@ -200,7 +201,7 @@ extension Model {
                 switch r.dimension {
                 case .width: horizontal = true
                 case .height: horizontal = false
-                case .edge(let d): horizontal = d.orientation == .horizontal
+                case .edge(let d), .border(let d): horizontal = d.orientation == .horizontal
                 }
                 let d = sign * CGFloat(r.px ?? r.ppt.map { Int((horizontal ? v.width : v.height) * CGFloat($0) / 100) } ?? 10)
                 switch r.dimension {
@@ -208,6 +209,7 @@ extension Model {
                 case .height, .edge(.down): f.size.height += d
                 case .edge(.left): f.origin.x -= d; f.size.width += d
                 case .edge(.up): f.origin.y -= d; f.size.height += d
+                case .border(let b): if b.orientation == .horizontal { f.size.width += b.isForward ? d : -d } else { f.size.height += b.isForward ? d : -d }
                 }
                 f.size.width = max(f.width, 50)
                 f.size.height = max(f.height, 50)
@@ -220,17 +222,48 @@ extension Model {
                 case .height: ws.resize(node, axis: .vertical, amount: amount, towardStart: nil, inner: config.gaps.inner)
                 case .edge(let d):
                     ws.resize(node, axis: d.orientation, amount: amount, towardStart: !d.isForward, inner: config.gaps.inner)
+                case .border(let d):
+                    // The border after the window (right/bottom) if it has one: moving it `d` grows or shrinks the
+                    // window. At the far edge, the border before it moves instead, the other way round.
+                    let flip: (ResizeAmount) -> ResizeAmount = { a in
+                        if case .px(let v) = a { return .px(-v) }
+                        if case .ppt(let v) = a { return .ppt(-v) }
+                        return a
+                    }
+                    let after = d.isForward ? amount : flip(amount)
+                    if !ws.resize(node, axis: d.orientation, amount: after, towardStart: false, inner: config.gaps.inner) {
+                        ws.resize(node, axis: d.orientation, amount: flip(after), towardStart: true, inner: config.gaps.inner)
+                    }
                 }
             }
 
         case .balance:
             ws.balance()
+
+        case .pseudo(let tg):
+            guard let w = win, !w.isFloating else { break }
+            w.isPseudo = tg == .toggle ? !w.isPseudo : tg == .enable
+            // Its own size; one that would fill the tile anyway (it was tiled when first seen) → two thirds.
+            if w.isPseudo, w.rect.width > 0 {
+                let r = w.rect
+                if let s = w.preferredSize, s.width > 1, s.height > 1, s.width < r.width * 0.95 || s.height < r.height * 0.95 {
+                } else {
+                    w.preferredSize = CGSize(width: (r.width * 2 / 3).rounded(), height: (r.height * 2 / 3).rounded())
+                }
+            }
+
+        case .pin(let tg):
+            guard let w = win else { break }
+            let on = tg == .toggle ? !w.isPinned : tg == .enable
+            if on && !w.isFloating { setFloating(w, true) }  // only a floating window can hover over every workspace
+            w.isPinned = on && w.isFloating
         }
         return []
     }
 
     func setFloatingFrame(_ w: WindowNode, _ f: CGRect) {
         w.floatingFrame = f
+        w.preferredSize = f.size
         w.floatingFrameDirty = true
     }
 
@@ -255,8 +288,9 @@ extension Model {
             ws.floating.removeAll { $0 === w }
             w.isFloating = false
             w.isScratchpad = false
+            w.isPinned = false
             w.floatingWorkspace = nil
-            ws.attachTiled(w)
+            if config.autoSplit { ws.attachDwindle(w) } else { ws.attachTiled(w) }
         }
         ws.touch(w)
     }
@@ -282,13 +316,24 @@ extension Model {
                 ?? left.first
                 ?? makeWorkspace(name: initialWorkspaceName(for: old), on: old)
         }
+        carryPinned()
     }
 
     func focusDirection(_ dir: Direction, from node: Node?, in ws: Workspace) {
         let floatingWin = (node as? WindowNode).flatMap { $0.isFloating ? $0 : nil }
-        if let node, floatingWin == nil, let w = ws.neighborWindow(of: node, dir) {
-            setFocus(w)
-            return
+        if let node, floatingWin == nil {
+            let tile = ws.neighborWindow(of: node, dir)
+            // Floating windows (a dialog over the split) are on the way too: the nearest one that way wins
+            // over the next tile, so they can be reached with the same keys instead of hiding behind the tiles.
+            let floats = ws.floating.compactMap { w in w.floatingFrame.map { (w, $0) } }
+            if !floats.isEmpty, let w = geometricNeighbor(from: node.rect, dir, among: floats + (tile.map { [($0, $0.rect)] } ?? [])) {
+                setFocus(w)
+                return
+            }
+            if let tile {
+                setFocus(tile)
+                return
+            }
         }
         if let fw = floatingWin {
             let src = fw.floatingFrame ?? fw.rect
